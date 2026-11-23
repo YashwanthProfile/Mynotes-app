@@ -13,7 +13,10 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 - Highlighter, stroke eraser, colours and sizes, undo and redo
 - Laser pointer with a fading trail or a dot that disappears when you lift the Pencil
 - Lasso selection: move, resize, rotate, recolour, change thickness or pen style, copy, paste, duplicate and delete
-- Text boxes, sticky notes, and images from Photos or Files with cropping
+- Text boxes, sticky notes you can write on with the Pencil, and images from Photos or Files with cropping
+- Ink written on a sticky note or image moves and resizes with it; group any objects together
+- Tap with a finger while editing to select notes, images, text and groups
+- Notebook tabs to keep several notebooks open and switch between them
 - Pinch to zoom, continuous page scrolling, pull up past the last page to add one
 - Pages panel in two columns with bookmarks and a bookmarked-only filter
 - Every notebook starts with a cover page you can write on, shown in the library

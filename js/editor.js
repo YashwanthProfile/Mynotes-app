@@ -1,7 +1,7 @@
 // The notebook editor: pages, zoom, Pencil input, tools, selection, items, modes, undo and saving.
 import {
   getNotebook, getPages, savePage, savePages, updateNotebook, blankPage, coverPage,
-  addPageToNotebook, removePageFromNotebook, newId,
+  addPageToNotebook, removePageFromNotebook, newId, listNotebooks,
 } from './db.js';
 import {
   PAGE_W, PAGE_H, PEN_TYPES, LINE_STYLES, drawStroke, drawStrokes, computeBBox, hitStroke, drawLaser, drawLaserDot,
@@ -60,6 +60,7 @@ function loadTools() {
         if (k !== 'tool' && saved[k] && typeof saved[k] === 'object') Object.assign(t[k], saved[k]);
       }
       if (ALL_TOOLS.includes(saved.tool)) t.tool = saved.tool;
+      if (saved.lastInk === 'pen' || saved.lastInk === 'highlighter') t.lastInk = saved.lastInk;
       if (Array.isArray(saved.recent)) t.recent = saved.recent.slice(0, 9);
     }
   } catch { /* ignore */ }
@@ -114,6 +115,7 @@ let sel = null;              // current selection
 let clipboard = null;        // { strokes, items }
 let editing = null;          // text or sticky being typed in
 let cropping = null;         // image being cropped
+let fingerTap = null;        // a finger touch that may turn out to be a tap
 let hiScrollTimer = null;
 
 const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
@@ -131,6 +133,7 @@ export function initEditor({ onClose }) {
     thumbsBtn: $('thumbs-btn'),
     title: $('notebook-title'),
     pageIndicator: $('page-indicator'),
+    tabStrip: $('tab-strip'),
     toolOptions: $('tool-options'),
     addPageBtn: $('add-page-btn'),
     exportBtn: $('export-btn'),
@@ -267,13 +270,30 @@ export async function openEditor(notebookId) {
   setMode(getSettings().openMode === 'edit' ? 'edit' : 'read', { quiet: true });
   buildPages();
   updateUndoButtons();
-  goToPage(1, { smooth: false });
+  let tab = tabs.find((t) => t.id === nb.id);
+  if (!tab) {
+    tab = { id: nb.id, title: nb.title, page: 1 };
+    tabs.push(tab);
+    if (tabs.length > 12) tabs.shift();
+  }
+  tab.title = nb.title;
+  // Drop tabs whose notebooks were deleted or moved to the Trash.
+  try {
+    const live = new Map((await listNotebooks()).filter((n) => !n.trashedAt).map((n) => [n.id, n]));
+    tabs = tabs.filter((t) => t.id === nb.id || live.has(t.id));
+    for (const t of tabs) if (live.has(t.id)) t.title = live.get(t.id).title;
+  } catch { /* keep the tabs as they are */ }
+  saveTabs();
+  renderTabs();
+  const startPage = Math.max(0, Math.min(nb.pageIds.length - 1, tab.page == null ? 1 : tab.page));
+  goToPage(startPage, { smooth: false });
   updatePageIndicator();
   return true;
 }
 
 export async function closeEditor() {
   if (!notebook) return;
+  rememberTabPlace();
   if (presenting) exitPresent();
   finishEditing();
   finishCrop(false);
@@ -300,6 +320,101 @@ async function renameNotebook() {
   notebook.title = name;
   els.title.textContent = name;
   await updateNotebook(notebook.id, { title: name });
+  const tab = tabs.find((t) => t.id === notebook.id);
+  if (tab) { tab.title = name; saveTabs(); renderTabs(); }
+}
+
+// ---------- Notebook tabs ----------
+
+const TABS_KEY = 'mynotes-tabs';
+let tabs = loadTabs();
+
+function loadTabs() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TABS_KEY) || '[]');
+    return Array.isArray(t) ? t.filter((x) => x && typeof x.id === 'string').slice(0, 12) : [];
+  } catch { return []; }
+}
+
+function saveTabs() {
+  try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs)); } catch { /* ignore */ }
+}
+
+function rememberTabPlace() {
+  if (!notebook) return;
+  const tab = tabs.find((t) => t.id === notebook.id);
+  if (tab) { tab.page = currentPageIndex(); saveTabs(); }
+}
+
+function renderTabs() {
+  const strip = els.tabStrip;
+  strip.replaceChildren();
+  for (const t of tabs) {
+    const el = document.createElement('div');
+    el.className = 'tab' + (notebook && t.id === notebook.id ? ' active' : '');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tab-title';
+    b.textContent = t.title || 'Untitled';
+    b.addEventListener('click', () => switchTab(t.id));
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'tab-close';
+    x.innerHTML = ICONS.close;
+    x.setAttribute('aria-label', `Close ${t.title || 'notebook'}`);
+    x.addEventListener('click', (e) => { e.stopPropagation(); closeTab(t.id); });
+    el.append(b, x);
+    strip.appendChild(el);
+  }
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'tab-add';
+  add.innerHTML = ICONS.plus;
+  add.setAttribute('aria-label', 'Open another notebook in a new tab');
+  add.addEventListener('click', () => openTabMenu(add));
+  strip.appendChild(add);
+  const act = strip.querySelector('.tab.active');
+  if (act && act.scrollIntoView) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+async function openTabMenu(anchor) {
+  const all = (await listNotebooks()).filter((n) => !n.trashedAt && !tabs.some((t) => t.id === n.id));
+  if (!all.length) { showToast('All your notebooks are already open'); return; }
+  openMenu('Open in new tab', all.slice(0, 30).map((n) => ({ icon: ICONS.cover, label: n.title || 'Untitled', onClick: () => switchTab(n.id) })), anchor);
+}
+
+let switching = false;
+async function switchTab(id) {
+  if (switching || (notebook && notebook.id === id)) return;
+  switching = true;
+  try {
+    rememberTabPlace();
+    const ok = await openEditor(id);
+    if (!ok) {
+      tabs = tabs.filter((t) => t.id !== id);
+      saveTabs();
+      renderTabs();
+      showToast('That notebook is no longer available');
+      if (!notebook) onCloseCb && onCloseCb();
+      return;
+    }
+    try { history.replaceState({ ...(history.state || {}), notebook: id }, ''); } catch { /* ignore */ }
+  } finally {
+    switching = false;
+  }
+}
+
+async function closeTab(id) {
+  const i = tabs.findIndex((t) => t.id === id);
+  if (i < 0) return;
+  const wasActive = notebook && notebook.id === id;
+  if (wasActive) rememberTabPlace();
+  tabs.splice(i, 1);
+  saveTabs();
+  if (!wasActive) { renderTabs(); return; }
+  const next = tabs[i] || tabs[i - 1];
+  if (next) await switchTab(next.id);
+  else { renderTabs(); onCloseCb && onCloseCb(); }
 }
 
 function notebookMenu() {
@@ -1027,6 +1142,7 @@ function onTouchStart(e) {
   const fingers = touches.filter((t) => t.touchType !== 'stylus');
   if (fingers.length === 2) {
     e.preventDefault();
+    fingerTap = null;
     if (active && active.pointerType === 'touch') cancelInteraction();
     pull = null;
     hidePull();
@@ -1228,6 +1344,7 @@ async function renderThumb(id) {
 // ---------- Toolbar ----------
 
 function setTool(t) {
+  if (t === 'pen' || t === 'highlighter') tools.lastInk = t;
   if (t !== 'lasso') clearSelection();
   finishEditing();
   finishCrop(true);
@@ -1636,17 +1753,27 @@ function onPointerDown(e) {
   }
   // Typing: taps inside the box move the caret; taps elsewhere end typing.
   if (editing) {
-    if (target.closest('[contenteditable="true"]')) return;
+    if (target.closest('[contenteditable="true"]') && e.pointerType !== 'pen') return;
     finishEditing();
-    e.preventDefault();
-    return;
+    // The Pencil ends typing and starts writing straight away.
+    if (e.pointerType !== 'pen' || !['pen', 'highlighter', 'eraser'].includes(tools.tool)) { e.preventDefault(); return; }
   }
   if (target.closest('.sel-bar')) return;
-  if (sel && target.closest('.sel-box')) { startSelTransform(e, target); return; }
+  if (sel && target.closest('.sel-box')) {
+    // With a writing tool, the Pencil sets the selection down and writes;
+    // fingers (and the lasso) move, resize and rotate it.
+    const writes = e.pointerType !== 'touch' && tools.tool !== 'lasso';
+    if (!writes) { startSelTransform(e, target); return; }
+    clearSelection();
+  }
 
   const wrap = target.closest('.page-wrap');
   if (!wrap) { clearSelection(); return; }
-  if (e.pointerType === 'touch' && !getSettings().fingerDraw) return; // fingers scroll
+  if (e.pointerType === 'touch' && !getSettings().fingerDraw) {
+    // Fingers scroll; a quick tap selects whatever is under it.
+    fingerTap = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), pageId: wrap.dataset.pageId };
+    return;
+  }
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
   els.popover.hidden = true;
@@ -1674,7 +1801,12 @@ function onPointerDown(e) {
     }
     pg.items.push(item);
     renderItems(pageId);
-    startEditing(pageId, item, true, before);
+    if (type === 'text') { startEditing(pageId, item, true, before); return; }
+    // A new sticky note is ready for handwriting; tap it twice to type.
+    pushUndo({ type: 'snap', pageId, before, after: snapshot(pg) });
+    markDirty(pageId);
+    setTool(tools.lastInk || 'pen');
+    showToast('Write on the note. Tap it twice to type.');
     return;
   }
 
@@ -1847,6 +1979,13 @@ function onPointerMove(e) {
 }
 
 function onPointerUp(e) {
+  if (fingerTap && e.pointerId === fingerTap.id) {
+    const ft = fingerTap;
+    fingerTap = null;
+    if (e.type === 'pointerup' && !pinch && !active && performance.now() - ft.t < 450
+      && Math.hypot(e.clientX - ft.x, e.clientY - ft.y) < 10) tapSelect(ft.pageId, e.clientX, e.clientY);
+    return;
+  }
   if (!active || e.pointerId !== active.pointerId) return;
   finishInteraction();
 }
@@ -1881,6 +2020,7 @@ function finishInteraction() {
     if (!a.stroke.points.length) { clearLive(); return; }
     if (a.stab && a.raw && !a.snapped) addPoint(a.stroke, [a.raw[0], a.raw[1]], a.raw[2]);
     computeBBox(a.stroke);
+    attachToItem(pg, a.stroke);
     pg.strokes.push(a.stroke);
     // Paint the finished stroke and drop the overlay in the same frame.
     paintStroke(a.pageId, a.stroke);
@@ -2134,9 +2274,74 @@ function boundsOf(strokes, items) {
   return b;
 }
 
+// Everything that shares a group with the picked objects comes along.
+function expandGroups(pg, strokeIds, itemIds) {
+  const groups = new Set();
+  for (const st of pg.strokes) if (st.group && strokeIds.has(st.id)) groups.add(st.group);
+  for (const it of pg.items) if (it.group && itemIds.has(it.id)) groups.add(it.group);
+  if (!groups.size) return;
+  for (const st of pg.strokes) if (st.group && groups.has(st.group)) strokeIds.add(st.id);
+  for (const it of pg.items) if (it.group && groups.has(it.group)) itemIds.add(it.id);
+}
+
+// A finger tap while editing selects the note, image, text box or group under it.
+function tapSelect(pageId, clientX, clientY) {
+  const v = views.get(pageId);
+  const pg = pages.get(pageId);
+  if (!v || !pg) return;
+  const rect = v.wrap.getBoundingClientRect();
+  const x = (clientX - rect.left) / scale, y = (clientY - rect.top) / scale;
+  const tol = Math.max(6, 12 / scale);
+  const strokeIds = new Set(), itemIds = new Set();
+  const st = [...pg.strokes].reverse().find((s) => s.group && s.tool !== 'fill' && hitStroke(s, x, y, tol));
+  const item = [...pg.items].reverse().find((it) => hitItem(it, x, y, 4));
+  if (st) strokeIds.add(st.id);
+  else if (item) itemIds.add(item.id);
+  if (!strokeIds.size && !itemIds.size) { clearSelection(); return; }
+  if (tools.tool === 'text' || tools.tool === 'sticky' || tools.tool === 'fill' || tools.tool === 'laser') setTool(tools.lastInk || 'pen');
+  makeSelection(pageId, strokeIds, itemIds);
+}
+
+// Ink written on a sticky note or image joins it, so they move and resize together.
+function attachToItem(pg, stroke) {
+  if (stroke.tool === 'fill') return;
+  const pts = stroke.points;
+  const n = pts.length / 3;
+  if (!n) return;
+  const step = Math.max(1, Math.floor(n / 24));
+  for (const it of [...pg.items].reverse()) {
+    if (it.type !== 'sticky' && it.type !== 'image') continue;
+    let inside = 0, total = 0;
+    for (let i = 0; i < n; i += step) { total++; if (hitItem(it, pts[i * 3], pts[i * 3 + 1], 2)) inside++; }
+    if (inside / total >= 0.8) {
+      if (!it.group) it.group = it.id;
+      stroke.group = it.group;
+      return;
+    }
+  }
+}
+
+function groupSelection(on) {
+  if (!sel) return;
+  const pg = pages.get(sel.pageId);
+  const before = snapshot(pg);
+  const gid = on ? newId() : null;
+  // Ungrouping keeps ink on a note or image attached to it.
+  pg.strokes = pg.strokes.map((st) => (sel.strokeIds.has(st.id) ? { ...st, group: gid || undefined } : st));
+  pg.items = pg.items.map((it) => (sel.itemIds.has(it.id) ? { ...it, group: gid || undefined } : it));
+  if (!on) for (const st of pg.strokes) if (sel.strokeIds.has(st.id)) delete st.group;
+  if (!on) for (const it of pg.items) if (sel.itemIds.has(it.id)) delete it.group;
+  pushUndo({ type: 'snap', pageId: sel.pageId, before, after: snapshot(pg) });
+  markDirty(sel.pageId);
+  const pageId = sel.pageId, sIds = new Set(sel.strokeIds), iIds = new Set(sel.itemIds);
+  if (on) { makeSelection(pageId, sIds, iIds); showToast('Grouped'); }
+  else { clearSelection(); showToast('Ungrouped'); }
+}
+
 function makeSelection(pageId, strokeIds, itemIds) {
   clearSelection();
   if (!strokeIds.size && !itemIds.size) return;
+  expandGroups(pages.get(pageId), strokeIds, itemIds);
   sel = { pageId, strokeIds, itemIds, tx: 0, ty: 0, s: 1, r: 0 };
   const { strokes, items } = selectedObjects();
   sel.bounds = boundsOf(strokes, items);
@@ -2339,7 +2544,10 @@ function endSelTransform(a) {
     if (sel.bar) sel.bar.hidden = false;
     // A second tap on a single text box or note starts typing.
     const { strokes, items } = selectedObjects();
-    if (!strokes.length && items.length === 1 && (items[0].type === 'text' || items[0].type === 'sticky')) {
+    // Ink grouped with a note does not stop a second tap from typing in it.
+    const one = items.length === 1 ? items[0] : null;
+    const onlyGroupInk = one && strokes.every((st) => st.group && st.group === one.group);
+    if (one && onlyGroupInk && (one.type === 'text' || one.type === 'sticky')) {
       const it = items[0];
       const pageId = sel.pageId;
       clearSelection();
@@ -2392,7 +2600,11 @@ function commitSelTransform() {
 function buildSelBar() {
   const bar = document.createElement('div');
   bar.className = 'sel-bar';
-  const { strokes, items } = selectedObjects();
+  const all = selectedObjects();
+  const items = all.items;
+  // A note or image with its own ink shows the note's options, not the ink's.
+  const one = items.length === 1 && items[0].type !== 'text' ? items[0] : null;
+  const strokes = one && all.strokes.every((st) => st.group && st.group === one.group) ? [] : all.strokes;
   const add = (label, onClick, cls = '') => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -2449,13 +2661,18 @@ function buildSelBar() {
       b.classList.add('small');
       bar.appendChild(b);
     }
-    add('Edit', () => { const pageId = sel.pageId; clearSelection(); startEditing(pageId, onlyItem, false); });
+    add('Type', () => { const pageId = sel.pageId; clearSelection(); startEditing(pageId, onlyItem, false); });
     sep();
   }
   if (onlyItem && onlyItem.type === 'image') {
     add('Crop', () => { const pageId = sel.pageId; clearSelection(); startCrop(pageId, onlyItem); });
     sep();
   }
+  const count = all.strokes.length + items.length;
+  const grouped = all.strokes.some((st) => st.group) || items.some((it) => it.group);
+  const groups = new Set([...all.strokes.map((st) => st.group), ...items.map((it) => it.group)]);
+  if (count > 1 && (groups.size > 1 || groups.has(undefined))) add('Group', () => groupSelection(true));
+  if (grouped) add('Ungroup', () => groupSelection(false));
   add('Copy', copySelection);
   add('Duplicate', duplicateSelection);
   add('Delete', deleteSelection, 'danger');
@@ -2472,11 +2689,14 @@ function copySelection() {
 function pasteObjects(pageId, strokes, items, dx, dy) {
   const pg = pages.get(pageId);
   const before = snapshot(pg);
+  const gmap = new Map();
+  const g = (old) => { if (!old) return undefined; if (!gmap.has(old)) gmap.set(old, newId()); return gmap.get(old); };
   const ns = strokes.map((s) => {
-    const n = transformStroke({ ...s, id: newId() }, [1, 0, 0, 1, dx, dy], 1);
+    const n = transformStroke({ ...s, id: newId(), group: g(s.group) }, [1, 0, 0, 1, dx, dy], 1);
+    if (!n.group) delete n.group;
     return n;
   });
-  const ni = items.map((it) => ({ ...it, id: newId(), x: it.x + dx, y: it.y + dy }));
+  const ni = items.map((it) => { const n = { ...it, id: newId(), group: g(it.group), x: it.x + dx, y: it.y + dy }; if (!n.group) delete n.group; return n; });
   pg.strokes.push(...ns);
   pg.items.push(...ni);
   pushUndo({ type: 'snap', pageId, before, after: snapshot(pg) });
@@ -2568,12 +2788,12 @@ function finishEditing() {
   if (document.activeElement === ed.body) ed.body.blur();
   const pg = pages.get(ed.pageId);
   if (!pg) return;
-  if (!text.trim()) {
+  if (!text.trim() && ed.type === 'text') {
     pg.items = pg.items.filter((it) => it.id !== ed.id);
   } else {
     pg.items = pg.items.map((it) => {
       if (it.id !== ed.id) return it;
-      const n = { ...it, text };
+      const n = { ...it, text: text.trim() ? text : '' };
       if (it.type === 'text') n.h = Math.max(it.fontSize * 1.4, ed.el.offsetHeight);
       return n;
     });
