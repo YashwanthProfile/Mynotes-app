@@ -2,7 +2,7 @@
 // Everything here lives only on this device.
 
 const DB_NAME = 'mynotes';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -22,6 +22,9 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('folders')) {
         db.createObjectStore('folders', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('blobs')) {
+        db.createObjectStore('blobs', { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -113,9 +116,23 @@ export async function getNotebook(id) {
   return tx('notebooks', 'readonly', (s) => promisify(s.get(id)));
 }
 
-export function blankPage(notebookId, paper) {
+export function blankPage(notebookId, paper, paperColor = 'cream') {
   const now = Date.now();
-  return { id: newId(), notebookId, paper, strokes: [], createdAt: now, updatedAt: now };
+  return { id: newId(), notebookId, paper, paperColor, strokes: [], createdAt: now, updatedAt: now };
+}
+
+export function coverPage(notebookId) {
+  const now = Date.now();
+  return { id: newId(), notebookId, kind: 'cover', paper: 'blank', strokes: [], createdAt: now, updatedAt: now };
+}
+
+export async function getPage(id) {
+  return tx('pages', 'readonly', (s) => promisify(s.get(id)));
+}
+
+export async function savePages(list) {
+  const now = Date.now();
+  await tx('pages', 'readwrite', (s) => { list.forEach((pg) => { pg.updatedAt = now; s.put(pg); }); });
 }
 
 export async function createNotebook({ title, cover, paper, folderId = null }) {
@@ -130,10 +147,12 @@ export async function createNotebook({ title, cover, paper, folderId = null }) {
     updatedAt: now,
     pageIds: [],
   };
+  const coverPg = coverPage(notebook.id);
   const firstPage = blankPage(notebook.id, paper);
-  notebook.pageIds.push(firstPage.id);
+  notebook.pageIds.push(coverPg.id, firstPage.id);
   await tx(['notebooks', 'pages'], 'readwrite', (nb, pg) => {
     nb.put(notebook);
+    pg.put(coverPg);
     pg.put(firstPage);
   });
   return notebook;
@@ -190,6 +209,19 @@ export async function removePageFromNotebook(notebookId, pageId) {
     nbStore.put(nb);
     pgStore.delete(pageId);
   });
+}
+
+// ---------- Images and other binary data ----------
+
+export async function putBlob(blob) {
+  const rec = { id: newId(), blob, type: blob.type, createdAt: Date.now() };
+  await tx('blobs', 'readwrite', (s) => s.put(rec));
+  return rec.id;
+}
+
+export async function getBlob(id) {
+  const rec = await tx('blobs', 'readonly', (s) => promisify(s.get(id)));
+  return rec ? rec.blob : null;
 }
 
 // Ask the browser to protect our storage from automatic clean-up.

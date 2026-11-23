@@ -5,14 +5,22 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 
 ## Features
 
-- Apple Pencil writing with pressure: pen, highlighter and eraser, with colours and sizes
-- Undo and redo, add, clear and delete pages
+- Apple Pencil writing with pressure: fountain, ballpoint and brush pens, solid, dashed or dotted lines
+- Adjustable stroke stabilization for smoother handwriting
+- Highlighter, stroke eraser, colours and sizes, undo and redo
+- Laser pointer with a fading trail or a dot that disappears when you lift the Pencil
+- Lasso selection: move, resize, rotate, recolour, change thickness or pen style, copy, paste, duplicate and delete
+- Text boxes, sticky notes, and images from Photos or Files with cropping
+- Pinch to zoom, continuous page scrolling, pull up past the last page to add one
+- Pages panel in two columns with bookmarks and a bookmarked-only filter
+- Every notebook starts with a cover page you can write on, shown in the library
+- Six page templates (blank, lined, narrow, grid, dotted, Cornell) and paper colours, per page or whole notebook
+- Opens read-only by default with an Edit switch, plus a presentation mode with a floating toolbar
 - Folders (nested) to organise notebooks, with move and rename
-- Paper styles: blank, lined, grid, dotted
 - Light, dark or system appearance, and an option to draw with a finger
 - Works offline once installed, and installs to the iPad Home Screen
 
-Coming next: hold-to-snap shapes, fill colour, Google Drive sync, and PDF import and export.
+Coming next: export and backup, shapes, fill, Google Drive sync, PDF import.
 
 ## Install on iPad
 
@@ -45,7 +53,9 @@ sw.js                   Offline support and updates
 css/app.css             Styles
 js/app.js               Library, folders and settings
 js/editor.js            Notebook editor: pages, Pencil input, tools, undo
-js/ink.js               Stroke drawing and eraser hit testing
+js/ink.js               Pen types, stroke drawing, laser and eraser hit testing
+js/items.js             Text boxes, images and sticky notes
+js/templates.js         Page templates and paper colours
 js/ui.js                Shared menus, dialogs and icons
 js/settings.js          Per-device preferences
 js/db.js                On-device storage (IndexedDB)

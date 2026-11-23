@@ -48,19 +48,29 @@
   </section>
 
   <!-- Notebook editor -->
-  <section id="notebook-view" class="view" hidden>
+  <section id="notebook-view" class="view mode-read" hidden>
     <header class="topbar editor-top">
       <button id="back-btn" class="btn btn-ghost back-btn" type="button" aria-label="Back to library">‹ Library</button>
+      <button id="thumbs-btn" class="icon-btn" type="button" aria-label="Page overview"></button>
       <button id="notebook-title" class="title-btn" type="button" aria-label="Rename notebook"></button>
-      <span id="page-indicator" class="page-indicator"></span>
-      <button id="undo-btn" class="icon-btn" type="button" aria-label="Undo"></button>
-      <button id="redo-btn" class="icon-btn" type="button" aria-label="Redo"></button>
-      <button id="add-page-btn" class="icon-btn" type="button" aria-label="Add page"></button>
-      <button id="editor-settings-btn" class="icon-btn" type="button" aria-label="Settings"></button>
+      <button id="page-indicator" class="page-indicator" type="button" aria-label="Show pages"></button>
+      <button id="undo-btn" class="icon-btn edit-only" type="button" aria-label="Undo"></button>
+      <button id="redo-btn" class="icon-btn edit-only" type="button" aria-label="Redo"></button>
+      <button id="mode-btn" class="mode-btn" type="button" aria-label="Switch between reading and editing"></button>
+      <button id="present-btn" class="icon-btn" type="button" aria-label="Presentation mode"></button>
+      <button id="editor-more-btn" class="icon-btn" type="button" aria-label="Notebook options"></button>
     </header>
-    <div id="toolbar" class="toolbar" role="toolbar" aria-label="Writing tools"></div>
-    <main id="pages" class="pages"></main>
+    <div id="toolbar" class="toolbar edit-only" role="toolbar" aria-label="Writing tools"></div>
+    <div id="stage" class="stage">
+      <aside id="thumbs" class="thumbs" aria-label="Pages" hidden></aside>
+      <main id="pages" class="pages"><div id="pages-inner" class="pages-inner"></div></main>
+      <div id="pull-hint" class="pull-hint" hidden><span class="pull-ring"></span><span class="pull-text">Pull up to add a page</span></div>
+      <div id="zoom-badge" class="zoom-badge" hidden></div>
+      <div id="present-bar" class="present-bar" role="toolbar" aria-label="Presentation tools" hidden></div>
+    </div>
+    <div id="pen-popover" class="popover" hidden></div>
     <input id="custom-color" type="color" class="visually-hidden" tabindex="-1" aria-hidden="true">
+    <input id="image-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1" aria-hidden="true">
   </section>
 
   <!-- Create / edit notebook -->
@@ -95,6 +105,13 @@
         <button type="button" data-theme-value="system" role="radio">System</button>
         <button type="button" data-theme-value="light" role="radio">Light</button>
         <button type="button" data-theme-value="dark" role="radio">Dark</button>
+      </div>
+    </div>
+    <div class="field">
+      <span>Open notebooks in</span>
+      <div class="segmented segmented-2" id="open-mode-options" role="radiogroup" aria-label="Open notebooks in">
+        <button type="button" data-open-mode="read" role="radio">Read only</button>
+        <button type="button" data-open-mode="edit" role="radio">Edit mode</button>
       </div>
     </div>
     <label class="toggle-row">

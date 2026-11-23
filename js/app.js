@@ -4,15 +4,12 @@ import {
 } from './db.js';
 import { getSettings, setSetting, applyTheme } from './settings.js';
 import { showToast, openMenu, confirmSheet, promptSheet, pickSheet, ICONS } from './ui.js';
-import { initEditor, openEditor, closeEditor } from './editor.js';
+import { initEditor, openEditor, closeEditor, renderCoverThumb } from './editor.js';
+import { TEMPLATES, applyPaper } from './templates.js';
+import { getPage } from './db.js';
 
 const COVERS = ['#2f6fdf', '#1f9d8b', '#e0a526', '#d9503f', '#8a5cd6', '#3d4a5c', '#c46a9b', '#6a9f3a'];
-const PAPERS = [
-  { id: 'blank', label: 'Blank' },
-  { id: 'lined', label: 'Lined' },
-  { id: 'grid', label: 'Grid' },
-  { id: 'dotted', label: 'Dotted' },
-];
+const PAPERS = TEMPLATES;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -27,7 +24,6 @@ const els = {
   folderBack: $('folder-back-btn'),
   breadcrumb: $('breadcrumb'),
   settingsBtn: $('settings-btn'),
-  editorSettingsBtn: $('editor-settings-btn'),
   storageStatus: $('storage-status'),
   versionLabel: $('version-label'),
   nbDialog: $('notebook-dialog'),
@@ -41,6 +37,7 @@ const els = {
   settingsDialog: $('settings-dialog'),
   themeOptions: $('theme-options'),
   fingerToggle: $('finger-toggle'),
+  openModeOptions: $('open-mode-options'),
   settingsStorage: $('settings-storage'),
   settingsVersion: $('settings-version'),
 };
@@ -155,19 +152,24 @@ async function renderLibrary() {
       title: nb.title,
       sub: formatDate(nb.updatedAt),
       color: nb.cover,
+      thumb: nb.thumb,
       onOpen: () => openNotebook(nb.id),
       onMore: () => notebookActions(nb, folders),
     }));
   }
 }
 
-function card({ kind, title, sub, color, onOpen, onMore }) {
+function card({ kind, title, sub, color, thumb, onOpen, onMore }) {
   const li = document.createElement('li');
   li.className = `card card-${kind}`;
   const open = document.createElement('button');
   open.type = 'button';
   open.className = kind === 'folder' ? 'folder-art' : 'cover';
   open.style.setProperty('--c', color);
+  if (thumb) {
+    open.classList.add('has-thumb');
+    open.style.backgroundImage = `url("${thumb}")`;
+  }
   open.setAttribute('aria-label', `Open ${title}`);
   open.addEventListener('click', onOpen);
 
@@ -297,7 +299,8 @@ function renderPickers() {
     b.setAttribute('role', 'radio');
     b.setAttribute('aria-checked', String(p.id === state.paper));
     const sw = document.createElement('span');
-    sw.className = `paper-swatch paper-${p.id}`;
+    sw.className = 'paper-swatch';
+    applyPaper(sw, { paper: p.id, paperColor: 'cream' }, null, 0.09);
     b.append(sw, document.createTextNode(p.label));
     b.addEventListener('click', () => { state.paper = p.id; renderPickers(); });
     els.paperOptions.appendChild(b);
@@ -333,7 +336,11 @@ els.nbForm.addEventListener('submit', async (e) => {
   const title = els.nbTitle.value.trim() || 'Untitled';
   els.nbDialog.close();
   if (state.editingId) {
-    await updateNotebook(state.editingId, { title, cover: state.cover });
+    const nb = await updateNotebook(state.editingId, { title, cover: state.cover });
+    if (nb && nb.thumb && nb.pageIds.length) {
+      const cover = await getPage(nb.pageIds[0]);
+      if (cover && cover.kind === 'cover') await updateNotebook(nb.id, { thumb: await renderCoverThumb(nb, cover) }, { touch: false });
+    }
     renderLibrary();
   } else {
     const nb = await createNotebook({ title, cover: state.cover, paper: state.paper, folderId: state.folderId });
@@ -350,6 +357,9 @@ function renderSettings() {
     b.setAttribute('aria-checked', String(b.dataset.themeValue === s.theme));
   });
   els.fingerToggle.checked = !!s.fingerDraw;
+  els.openModeOptions.querySelectorAll('button').forEach((b) => {
+    b.setAttribute('aria-checked', String(b.dataset.openMode === s.openMode));
+  });
   els.settingsVersion.textContent = state.version ? `MyNotes v${state.version}` : 'MyNotes';
 }
 
@@ -363,6 +373,12 @@ els.themeOptions.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   setSetting('theme', b.dataset.themeValue);
+  renderSettings();
+});
+els.openModeOptions.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  setSetting('openMode', b.dataset.openMode);
   renderSettings();
 });
 els.fingerToggle.addEventListener('change', () => setSetting('fingerDraw', els.fingerToggle.checked));
@@ -449,13 +465,11 @@ function initServiceWorker() {
 
 applyTheme();
 els.settingsBtn.innerHTML = ICONS.gear;
-els.editorSettingsBtn.innerHTML = ICONS.gear;
 [els.nbDialog, els.settingsDialog].forEach(wireDialog);
 els.newBtn.addEventListener('click', newMenu);
 els.emptyCreateBtn.addEventListener('click', openCreateDialog);
 els.folderBack.addEventListener('click', () => history.back());
 els.settingsBtn.addEventListener('click', openSettings);
-els.editorSettingsBtn.addEventListener('click', openSettings);
 
 initEditor({ onClose: () => history.back() });
 history.replaceState({ folder: null }, '');

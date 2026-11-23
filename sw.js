@@ -1,6 +1,6 @@
 // Service worker: keeps MyNotes working offline.
 // Bump VERSION whenever any app file changes so iPads pick up the update.
-const VERSION = '0.2.0';
+const VERSION = '0.4.0';
 const CACHE = `mynotes-${VERSION}`;
 
 const APP_FILES = [
@@ -13,7 +13,9 @@ const APP_FILES = [
   './js/ui.js',
   './js/ink.js',
   './js/editor.js',
+  './js/items.js',
   './js/settings.js',
+  './js/templates.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',

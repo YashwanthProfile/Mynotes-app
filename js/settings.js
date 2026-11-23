@@ -1,6 +1,6 @@
 // Per-device preferences (appearance, finger drawing).
 const KEY = 'mynotes-settings';
-const DEFAULTS = { theme: 'system', fingerDraw: false };
+const DEFAULTS = { theme: 'system', fingerDraw: false, openMode: 'read' };
 
 let current = { ...DEFAULTS };
 try {
