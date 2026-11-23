@@ -2,7 +2,7 @@
 // Everything here lives only on this device.
 
 const DB_NAME = 'mynotes';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -19,6 +19,9 @@ function openDb() {
       if (!db.objectStoreNames.contains('pages')) {
         const s = db.createObjectStore('pages', { keyPath: 'id' });
         s.createIndex('notebookId', 'notebookId');
+      }
+      if (!db.objectStoreNames.contains('folders')) {
+        db.createObjectStore('folders', { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -54,6 +57,53 @@ export function newId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
+// ---------- Folders ----------
+
+export async function listFolders() {
+  const all = await tx('folders', 'readonly', (s) => promisify(s.getAll()));
+  return all.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+export async function getFolder(id) {
+  return tx('folders', 'readonly', (s) => promisify(s.get(id)));
+}
+
+export async function createFolder({ name, parentId = null, color }) {
+  const now = Date.now();
+  const folder = { id: newId(), name: name || 'New folder', parentId, color, createdAt: now, updatedAt: now };
+  await tx('folders', 'readwrite', (s) => s.put(folder));
+  return folder;
+}
+
+export async function updateFolder(id, changes) {
+  return tx('folders', 'readwrite', async (s) => {
+    const f = await promisify(s.get(id));
+    if (!f) return null;
+    Object.assign(f, changes, { updatedAt: Date.now() });
+    s.put(f);
+    return f;
+  });
+}
+
+// Deletes a folder together with everything inside it.
+export async function deleteFolderDeep(id) {
+  const folders = await listFolders();
+  const notebooks = await listNotebooks();
+  const doomed = new Set([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const f of folders) {
+      if (f.parentId && doomed.has(f.parentId) && !doomed.has(f.id)) { doomed.add(f.id); grew = true; }
+    }
+  }
+  const doomedNotebooks = notebooks.filter((n) => n.folderId && doomed.has(n.folderId));
+  for (const nb of doomedNotebooks) await deleteNotebook(nb.id);
+  await tx('folders', 'readwrite', (s) => { doomed.forEach((fid) => s.delete(fid)); });
+}
+
+// ---------- Notebooks ----------
+
 export async function listNotebooks() {
   const all = await tx('notebooks', 'readonly', (s) => promisify(s.getAll()));
   return all.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -63,18 +113,24 @@ export async function getNotebook(id) {
   return tx('notebooks', 'readonly', (s) => promisify(s.get(id)));
 }
 
-export async function createNotebook({ title, cover, paper }) {
+export function blankPage(notebookId, paper) {
+  const now = Date.now();
+  return { id: newId(), notebookId, paper, strokes: [], createdAt: now, updatedAt: now };
+}
+
+export async function createNotebook({ title, cover, paper, folderId = null }) {
   const now = Date.now();
   const notebook = {
     id: newId(),
     title: title || 'Untitled',
     cover,
     paper,
+    folderId,
     createdAt: now,
     updatedAt: now,
     pageIds: [],
   };
-  const firstPage = { id: newId(), notebookId: notebook.id, paper, strokes: [], createdAt: now, updatedAt: now };
+  const firstPage = blankPage(notebook.id, paper);
   notebook.pageIds.push(firstPage.id);
   await tx(['notebooks', 'pages'], 'readwrite', (nb, pg) => {
     nb.put(notebook);
@@ -83,11 +139,12 @@ export async function createNotebook({ title, cover, paper }) {
   return notebook;
 }
 
-export async function updateNotebook(id, changes) {
+export async function updateNotebook(id, changes, { touch = true } = {}) {
   return tx('notebooks', 'readwrite', async (s) => {
     const nb = await promisify(s.get(id));
     if (!nb) return null;
-    Object.assign(nb, changes, { updatedAt: Date.now() });
+    Object.assign(nb, changes);
+    if (touch) nb.updatedAt = Date.now();
     s.put(nb);
     return nb;
   });
@@ -98,6 +155,40 @@ export async function deleteNotebook(id) {
     const keys = await promisify(pg.index('notebookId').getAllKeys(id));
     keys.forEach((k) => pg.delete(k));
     nb.delete(id);
+  });
+}
+
+// ---------- Pages ----------
+
+export async function getPages(notebookId) {
+  return tx('pages', 'readonly', (s) => promisify(s.index('notebookId').getAll(notebookId)));
+}
+
+export async function savePage(page) {
+  page.updatedAt = Date.now();
+  await tx('pages', 'readwrite', (s) => s.put(page));
+}
+
+export async function addPageToNotebook(notebookId, page, index) {
+  await tx(['notebooks', 'pages'], 'readwrite', async (nbStore, pgStore) => {
+    const nb = await promisify(nbStore.get(notebookId));
+    if (!nb) return;
+    const at = index == null ? nb.pageIds.length : index;
+    nb.pageIds.splice(at, 0, page.id);
+    nb.updatedAt = Date.now();
+    nbStore.put(nb);
+    pgStore.put(page);
+  });
+}
+
+export async function removePageFromNotebook(notebookId, pageId) {
+  await tx(['notebooks', 'pages'], 'readwrite', async (nbStore, pgStore) => {
+    const nb = await promisify(nbStore.get(notebookId));
+    if (!nb) return;
+    nb.pageIds = nb.pageIds.filter((id) => id !== pageId);
+    nb.updatedAt = Date.now();
+    nbStore.put(nb);
+    pgStore.delete(pageId);
   });
 }
 

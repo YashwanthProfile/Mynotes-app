@@ -5,12 +5,14 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 
 ## Features
 
-- Notebook library with cover colours
+- Apple Pencil writing with pressure: pen, highlighter and eraser, with colours and sizes
+- Undo and redo, add, clear and delete pages
+- Folders (nested) to organise notebooks, with move and rename
 - Paper styles: blank, lined, grid, dotted
-- Works offline once installed
-- Installs to the iPad Home Screen and opens full screen
+- Light, dark or system appearance, and an option to draw with a finger
+- Works offline once installed, and installs to the iPad Home Screen
 
-Coming next: Apple Pencil writing, hold-to-snap shapes, fill colour, Google Drive sync, and PDF import and export.
+Coming next: hold-to-snap shapes, fill colour, Google Drive sync, and PDF import and export.
 
 ## Install on iPad
 
@@ -41,7 +43,11 @@ index.html              App page
 manifest.webmanifest    Home Screen install details
 sw.js                   Offline support and updates
 css/app.css             Styles
-js/app.js               App logic
+js/app.js               Library, folders and settings
+js/editor.js            Notebook editor: pages, Pencil input, tools, undo
+js/ink.js               Stroke drawing and eraser hit testing
+js/ui.js                Shared menus, dialogs and icons
+js/settings.js          Per-device preferences
 js/db.js                On-device storage (IndexedDB)
 icons/                  App icons
 ```
