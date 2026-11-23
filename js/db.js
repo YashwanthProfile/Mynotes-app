@@ -234,3 +234,29 @@ export async function requestPersistentStorage() {
     return false;
   }
 }
+
+// ---------- Backup and restore ----------
+
+export async function putBlobWithId(id, blob) {
+  await tx('blobs', 'readwrite', (s) => s.put({ id, blob, type: blob.type, createdAt: Date.now() }));
+}
+
+// Saves an imported notebook under fresh ids so it never overwrites anything.
+export async function importNotebook(nb, pageList, folderId = null) {
+  const now = Date.now();
+  const idMap = new Map();
+  const notebook = { ...nb, id: newId(), folderId, updatedAt: now, trashedAt: undefined };
+  delete notebook.trashedAt;
+  const newPages = pageList.map((pg) => {
+    const id = newId();
+    idMap.set(pg.id, id);
+    return { ...pg, id, notebookId: notebook.id };
+  });
+  notebook.pageIds = (nb.pageIds || []).map((id) => idMap.get(id)).filter(Boolean);
+  for (const pg of newPages) if (!notebook.pageIds.includes(pg.id)) notebook.pageIds.push(pg.id);
+  await tx(['notebooks', 'pages'], 'readwrite', (nbs, pgs) => {
+    nbs.put(notebook);
+    newPages.forEach((pg) => pgs.put(pg));
+  });
+  return notebook;
+}

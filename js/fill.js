@@ -2,7 +2,7 @@
 // outline loops (page units), so the fill stays sharp at any zoom.
 import { PAGE_W, PAGE_H, drawStroke } from './ink.js';
 
-const K = 0.6; // raster pixels per page unit
+const K = 2; // raster pixels per page unit (fine enough that edges hide under the ink)
 
 export function findFillArea(strokes, x, y) {
   const W = Math.ceil(PAGE_W * K), H = Math.ceil(PAGE_H * K);
@@ -13,7 +13,7 @@ export function findFillArea(strokes, x, y) {
   for (const s of strokes) {
     if (s.tool === 'fill' || s.tool === 'highlighter') continue;
     // Thicker and solid, so small gaps in a hand-drawn outline still close.
-    const wall = { ...s, dash: 'solid', size: s.size + 1.2, pen: 'ball' };
+    const wall = { ...s, dash: 'solid', size: s.size + 0.8, pen: 'ball' };
     drawStroke(ctx, wall, '#000');
   }
   const data = ctx.getImageData(0, 0, W, H).data;
@@ -49,28 +49,40 @@ export function findFillArea(strokes, x, y) {
   }
   if (area > W * H * 0.8) return { error: 'open' };
 
-  // Grow one pixel so the fill tucks under the outline instead of leaving a white rim.
-  let grown = region;
-  for (let pass = 0; pass < 2; pass++) {
+  // Bounding box of the region, so the remaining passes only touch that area.
+  let x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (let py = 0; py < H; py++) {
+    const row = py * W;
+    for (let px = 0; px < W; px++) if (region[row + px]) { if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py; }
+  }
+  const PAD = 4;
+  x0 = Math.max(0, x0 - PAD); y0 = Math.max(0, y0 - PAD);
+  x1 = Math.min(W - 1, x1 + PAD); y1 = Math.min(H - 1, y1 + PAD);
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  let grown = new Uint8Array(bw * bh);
+  for (let py = 0; py < bh; py++) for (let px = 0; px < bw; px++) grown[py * bw + px] = region[(py + y0) * W + px + x0];
+  // Grow about one page unit so the fill tucks under the ink, but only into
+  // ink pixels, never past the outline.
+  for (let pass = 0; pass < 3; pass++) {
     const src = grown;
     grown = src.slice();
-    for (let py = 0; py < H; py++) {
-      for (let px = 0; px < W; px++) {
-        const i = py * W + px;
-        if (src[i]) continue;
-        if ((px > 0 && src[i - 1]) || (px < W - 1 && src[i + 1]) || (py > 0 && src[i - W]) || (py < H - 1 && src[i + W])) grown[i] = 1;
+    for (let py = 0; py < bh; py++) {
+      for (let px = 0; px < bw; px++) {
+        const i = py * bw + px;
+        if (src[i] || !wall[(py + y0) * W + px + x0]) continue;
+        if ((px > 0 && src[i - 1]) || (px < bw - 1 && src[i + 1]) || (py > 0 && src[i - bw]) || (py < bh - 1 && src[i + bw])) grown[i] = 1;
       }
     }
   }
-  const loops = traceLoops(grown, W, H)
-    .map((l) => simplifyLoop(l, 0.5))
-    .filter((l) => l.length >= 3 && Math.abs(loopArea(l)) > 3);
+  const loops = traceLoops(grown, bw, bh)
+    .map((l) => smoothLoop(simplifyLoop(l, 0.8)))
+    .filter((l) => l.length >= 3 && Math.abs(loopArea(l)) > 30);
   if (!loops.length) return { error: 'open' };
   const points = [];
   const lens = [];
   for (const l of loops) {
     lens.push(l.length);
-    for (const [px, py] of l) points.push(Math.round((px / K) * 10) / 10, Math.round((py / K) * 10) / 10, 1);
+    for (const [px, py] of l) points.push(Math.round(((px + x0) / K) * 10) / 10, Math.round(((py + y0) / K) * 10) / 10, 1);
   }
   return { points, loops: lens };
 }
@@ -147,5 +159,16 @@ function simplifyLoop(l, eps) {
   }
   const out = [];
   for (let i = 0; i < pts.length - 1; i++) if (keep[i]) out.push(pts[i]);
+  return out;
+}
+
+// One round of Chaikin corner cutting: removes the pixel staircase.
+function smoothLoop(l) {
+  if (l.length < 4) return l;
+  const out = [];
+  for (let i = 0; i < l.length; i++) {
+    const a = l[i], b = l[(i + 1) % l.length];
+    out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+  }
   return out;
 }

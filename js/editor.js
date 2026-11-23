@@ -7,13 +7,14 @@ import {
   PAGE_W, PAGE_H, PEN_TYPES, LINE_STYLES, drawStroke, drawStrokes, computeBBox, hitStroke, drawLaser, drawLaserDot,
   LASER_LIFE, isSolidPen, strokeRadii, liveLag, drawPenRange,
 } from './ink.js';
-import { recognize, toFlat } from './shapes.js';
+import { recognize, toFlat, snapAngle } from './shapes.js';
 import { findFillArea } from './fill.js';
+import { exportPdf, exportPng, exportBackup, saveFile, safeName } from './export.js';
 import {
   STICKY_COLORS, TEXT_SIZES, TEXT_COLORS, selectionMatrix, applyM, itemBBox, itemCenter, hitItem, toItemLocal,
   transformItem, newTextItem, newStickyItem, imageItemFromFile, renderItem, drawItems, blobUrl,
 } from './items.js';
-import { TEMPLATES, PAPER_COLORS, applyPaper } from './templates.js';
+import { TEMPLATES, PAPER_COLORS, SPACINGS, applyPaper, normPaper, hasSpacing, drawPaper } from './templates.js';
 import { getSettings, setSetting, onSettingsChange } from './settings.js';
 import { openMenu, confirmSheet, promptSheet, showToast, ICONS } from './ui.js';
 
@@ -130,6 +131,9 @@ export function initEditor({ onClose }) {
     thumbsBtn: $('thumbs-btn'),
     title: $('notebook-title'),
     pageIndicator: $('page-indicator'),
+    toolOptions: $('tool-options'),
+    addPageBtn: $('add-page-btn'),
+    exportBtn: $('export-btn'),
     undo: $('undo-btn'),
     redo: $('redo-btn'),
     modeBtn: $('mode-btn'),
@@ -159,6 +163,10 @@ export function initEditor({ onClose }) {
   els.moreBtn.innerHTML = ICONS.more;
   els.searchBtn.innerHTML = ICONS.search;
   els.back.innerHTML = ICONS.back;
+  els.addPageBtn.innerHTML = ICONS.addPage;
+  els.exportBtn.innerHTML = ICONS.share;
+  els.addPageBtn.addEventListener('click', () => addPageAfter(currentPageIndex()));
+  els.exportBtn.addEventListener('click', exportMenu);
   els.searchBtn.addEventListener('click', toggleSearch);
   els.searchInput.addEventListener('input', renderSearch);
   els.searchInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSearch(); });
@@ -306,6 +314,51 @@ function notebookMenu() {
     { icon: ICONS.present, label: 'Present', onClick: enterPresent },
     { icon: ICONS.rename, label: 'Rename notebook', onClick: renameNotebook },
   ], els.moreBtn);
+}
+
+// ---------- Export ----------
+
+function exportMenu() {
+  const idx = currentPageIndex();
+  const pageId = notebook.pageIds[idx];
+  openMenu('Export', [
+    { icon: ICONS.pdf, label: 'PDF of notebook', onClick: () => runExport('pdf-all') },
+    { icon: ICONS.page, label: 'PDF of this page', onClick: () => runExport('pdf-page', pageId) },
+    { icon: ICONS.image, label: 'Image of this page', onClick: () => runExport('png', pageId) },
+    { sep: true },
+    { icon: ICONS.backup, label: 'Backup file (.mynotes)', onClick: () => runExport('backup') },
+  ], els.exportBtn);
+}
+
+let exporting = false;
+async function runExport(kind, pageId) {
+  if (exporting) return;
+  exporting = true;
+  try {
+    await flushSaves();
+    const name = safeName(notebook.title);
+    let blob, file;
+    if (kind === 'pdf-all' || kind === 'pdf-page') {
+      const list = kind === 'pdf-all' ? notebook.pageIds.map((id) => pages.get(id)).filter(Boolean) : [pages.get(pageId)];
+      showToast('Making PDF…');
+      blob = await exportPdf(notebook, list, (i, n) => { if (n > 3) showToast(`Making PDF… ${i + 1} of ${n}`); });
+      file = kind === 'pdf-all' ? `${name}.pdf` : `${name} - page ${notebook.pageIds.indexOf(pageId)}.pdf`;
+    } else if (kind === 'png') {
+      blob = await exportPng(notebook, pages.get(pageId));
+      file = `${name} - page ${notebook.pageIds.indexOf(pageId)}.png`;
+    } else {
+      blob = await exportBackup(notebook.id);
+      file = `${name}.mynotes`;
+    }
+    const res = await saveFile(blob, file);
+    if (res === 'needs-tap') showToast('Ready', { label: 'Save', onClick: () => saveFile(blob, file, { fallback: true }) });
+    else if (res === 'downloaded') showToast('Saved to Downloads');
+  } catch (e) {
+    console.error(e);
+    showToast('Could not export');
+  } finally {
+    exporting = false;
+  }
 }
 
 function darkPagesOn() {
@@ -612,7 +665,7 @@ function relayout({ keepIndex = null, anchor = null, keepScroll = false } = {}) 
     v.wrap.style.width = `${w}px`;
     v.wrap.style.height = `${h}px`;
     v.itemsLayer.style.transform = `scale(${scale})`;
-    applyPaper(v.wrap, pg, notebook, scale);
+    applyPaper(v.wrap, pg, notebook);
     v.lowScale = 0;
     hideHi(v);
     if (v.visible) renderLow(id);
@@ -917,8 +970,8 @@ function goToPage(i, { smooth = true } = {}) {
 
 // ---------- Zoom ----------
 
-function showZoomBadge(z) {
-  els.zoomBadge.textContent = `${Math.round(z * 100)}%`;
+function showZoomBadge(z, text) {
+  els.zoomBadge.textContent = text || `${Math.round(z * 100)}%`;
   els.zoomBadge.hidden = false;
   clearTimeout(showZoomBadge.t);
   showZoomBadge.t = setTimeout(() => { els.zoomBadge.hidden = true; }, 900);
@@ -1158,7 +1211,7 @@ async function renderThumb(id) {
   const paper = b.querySelector('.thumb-paper');
   const cssW = paper.clientWidth || 110;
   const s = cssW / PAGE_W;
-  applyPaper(paper, pg, notebook, s);
+  applyPaper(paper, pg, notebook, 2.5);
   const c = paper.querySelector('canvas');
   const off = document.createElement('canvas');
   const r = dpr();
@@ -1188,7 +1241,9 @@ function setTool(t) {
 function renderToolbar() {
   const tb = els.toolbar;
   tb.replaceChildren();
-  const group = (cls) => { const g = document.createElement('div'); g.className = `tool-group ${cls}`; tb.appendChild(g); return g; };
+  els.toolOptions.replaceChildren();
+  let target = tb;
+  const group = (cls) => { const g = document.createElement('div'); g.className = `tool-group ${cls}`; target.appendChild(g); return g; };
   const toolBtn = (g, t, onClick) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1196,6 +1251,7 @@ function renderToolbar() {
     b.innerHTML = ICONS[t];
     b.setAttribute('aria-label', TOOL_NAMES[t]);
     b.setAttribute('aria-pressed', String(tools.tool === t));
+    if (SLOT_TOOLS.includes(t)) b.style.setProperty('--tool-c', tools[t].color);
     b.addEventListener('click', onClick || (() => {
       if (tools.tool === t && t === 'pen') { togglePenPopover(b); return; }
       if (tools.tool === t && SLOT_TOOLS.includes(t)) {
@@ -1217,15 +1273,24 @@ function renderToolbar() {
   imgBtn.classList.remove('active');
   toolBtn(insertGroup, 'sticky');
 
+  // Options for the current tool float in a pill under the top bar.
+  target = els.toolOptions;
   const t = tools.tool;
   if (t === 'pen') {
-    const styleBtn = document.createElement('button');
-    styleBtn.type = 'button';
-    styleBtn.className = 'style-btn';
-    styleBtn.textContent = penStyleLabel();
-    styleBtn.setAttribute('aria-label', 'Pen style');
-    styleBtn.addEventListener('click', () => togglePenPopover(styleBtn));
-    group('style').appendChild(styleBtn);
+    const optBtn = (g, icon, label, on, click) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'opt-btn' + (on ? ' active' : '');
+      b.innerHTML = icon;
+      b.setAttribute('aria-label', label);
+      b.setAttribute('aria-pressed', String(on));
+      b.addEventListener('click', click);
+      g.appendChild(b);
+    };
+    const tg = group('pen-types');
+    for (const pt of PEN_TYPES) optBtn(tg, ICONS['nib_' + pt.id], pt.label, tools.pen.type === pt.id, () => { tools.pen.type = pt.id; saveTools(); renderToolbar(); });
+    const lg = group('line-styles');
+    for (const ls of LINE_STYLES) optBtn(lg, ICONS['line_' + ls.id], ls.label, (tools.pen.dash || 'solid') === ls.id, () => { tools.pen.dash = ls.id; saveTools(); renderToolbar(); });
   }
   if (SLOT_TOOLS.includes(t)) {
     const colorGroup = group('colors');
@@ -1286,26 +1351,13 @@ function renderToolbar() {
       }));
     }
   }
-  if (t === 'lasso') {
-    const g = group('hint');
-    if (clipboard) {
-      const paste = document.createElement('button');
-      paste.type = 'button';
-      paste.className = 'style-btn';
-      paste.textContent = 'Paste';
-      paste.addEventListener('click', pasteClipboard);
-      g.appendChild(paste);
-    }
-    const hint = document.createElement('span');
-    hint.className = 'tool-hint';
-    hint.textContent = 'Circle anything to select it, or tap an item.';
-    g.appendChild(hint);
-  }
-  if (t === 'text' || t === 'sticky') {
-    const hint = document.createElement('span');
-    hint.className = 'tool-hint';
-    hint.textContent = t === 'text' ? 'Tap the page to type.' : 'Tap the page to add a note.';
-    group('hint').appendChild(hint);
+  if (t === 'lasso' && clipboard) {
+    const paste = document.createElement('button');
+    paste.type = 'button';
+    paste.className = 'style-btn';
+    paste.textContent = 'Paste';
+    paste.addEventListener('click', pasteClipboard);
+    group('paste').appendChild(paste);
   }
 }
 
@@ -1705,6 +1757,9 @@ function moveSnapped(a, x, y) {
   if (sn.kind === 'line') {
     const [x0, y0] = sn.base[0];
     const len = Math.hypot(x - x0, y - y0);
+    // Hold still near level, upright or 45 degrees and the line clicks onto it.
+    const ang0 = Math.atan2(y - y0, x - x0), ang = snapAngle(ang0);
+    if (ang !== ang0) { x = x0 + Math.cos(ang) * len; y = y0 + Math.sin(ang) * len; }
     const k = Math.max(1, Math.ceil(len / 3));
     list = [];
     for (let i = 0; i <= k; i++) list.push([x0 + ((x - x0) * i) / k, y0 + ((y - y0) * i) / k]);
@@ -2187,6 +2242,7 @@ function startSelTransform(e, target) {
   active = {
     kind: 'sel', how, pointerId: e.pointerId, pointerType: e.pointerType, pageId: sel.pageId, rect, start, c0,
     t0: { tx: sel.tx, ty: sel.ty, s: sel.s, r: sel.r }, items: items.map((it) => ({ ...it })), moved: false,
+    snap: how === 'move' ? snapTargets(sel.pageId) : null,
   };
   try { els.pages.setPointerCapture(e.pointerId); } catch { /* ignore */ }
   if (sel.bar) sel.bar.hidden = true;
@@ -2200,6 +2256,7 @@ function moveSelTransform(e) {
   if (a.how === 'move') {
     sel.tx = a.t0.tx + (x - sx);
     sel.ty = a.t0.ty + (y - sy);
+    snapMove(a);
   } else if (a.how === 'scale') {
     const d0 = Math.hypot(sx - a.c0[0], sy - a.c0[1]) || 1;
     const d1 = Math.hypot(x - a.c0[0], y - a.c0[1]);
@@ -2208,10 +2265,14 @@ function moveSelTransform(e) {
     const a0 = Math.atan2(sy - a.c0[1], sx - a.c0[0]);
     const a1 = Math.atan2(y - a.c0[1], x - a.c0[0]);
     let r = a.t0.r + (a1 - a0);
-    const q = Math.PI / 2;
-    const snapped = Math.round(r / q) * q;
-    if (Math.abs(r - snapped) < 0.06) r = snapped;
-    sel.r = r;
+    // Clicks onto right angles and 45 degrees, and more gently onto 15 degree steps.
+    let rs = snapAngle(r, Math.PI / 4, 0.09);
+    if (rs === r) rs = snapAngle(r, Math.PI / 12, 0.035);
+    sel.r = rs;
+    let deg = Math.round((rs * 180) / Math.PI) % 360;
+    if (deg > 180) deg -= 360;
+    if (deg < -180) deg += 360;
+    showZoomBadge(0, `${deg}°`);
   }
   applySelCSS();
   const m = currentSelMatrix();
@@ -2221,7 +2282,56 @@ function moveSelTransform(e) {
   }
 }
 
+// Edges and centres the selection can line up with: the page and other objects.
+function snapTargets(pageId) {
+  const pg = pages.get(pageId);
+  const xs = [PAGE_W / 2], ys = [PAGE_H / 2];
+  const add = (b) => { xs.push(b[0], (b[0] + b[2]) / 2, b[2]); ys.push(b[1], (b[1] + b[3]) / 2, b[3]); };
+  let n = 0;
+  for (const st of pg.strokes) {
+    if (sel.strokeIds.has(st.id) || st.tool === 'fill') continue;
+    if (++n > 400) break;
+    add(st.bbox || computeBBox(st));
+  }
+  for (const it of pg.items || []) if (!sel.itemIds.has(it.id)) add([it.x, it.y, it.x + it.w, it.y + it.h]);
+  return { xs, ys };
+}
+
+function snapMove(a) {
+  const [x0, y0, x1, y1] = sel.bounds;
+  const [cx, cy] = selCenter();
+  const hw = ((x1 - x0) / 2) * sel.s, hh = ((y1 - y0) / 2) * sel.s;
+  const tol = 6 / scale;
+  const best = (mine, targets) => {
+    let d = Infinity, at = null;
+    for (const m of mine) for (const t of targets) { const k = t - m; if (Math.abs(k) < Math.abs(d)) { d = k; at = t; } }
+    return Math.abs(d) <= tol ? { d, at } : null;
+  };
+  const ncx = cx + sel.tx, ncy = cy + sel.ty;
+  const bx = best([ncx - hw, ncx, ncx + hw], a.snap.xs);
+  const by = best([ncy - hh, ncy, ncy + hh], a.snap.ys);
+  if (bx) sel.tx += bx.d;
+  if (by) sel.ty += by.d;
+  showGuides(a, bx && bx.at, by && by.at);
+}
+
+function showGuides(a, gx, gy) {
+  const v = views.get(sel.pageId);
+  if (!v) return;
+  if (!a.guides) {
+    a.guides = [document.createElement('div'), document.createElement('div')];
+    a.guides[0].className = 'snap-guide v';
+    a.guides[1].className = 'snap-guide h';
+    v.uiLayer.append(...a.guides);
+  }
+  a.guides[0].hidden = gx == null;
+  a.guides[1].hidden = gy == null;
+  if (gx != null) a.guides[0].style.left = `${gx * scale}px`;
+  if (gy != null) a.guides[1].style.top = `${gy * scale}px`;
+}
+
 function endSelTransform(a) {
+  if (a.guides) a.guides.forEach((g) => g.remove());
   if (!sel) return;
   if (!a.moved) {
     sel.tx = a.t0.tx; sel.ty = a.t0.ty; sel.s = a.t0.s; sel.r = a.t0.r;
@@ -2728,6 +2838,7 @@ async function addPageAfter(index) {
   if (isCover(ref)) ref = pages.get(notebook.pageIds[1]);
   ref = ref || {};
   const pg = blankPage(notebook.id, ref.paper || notebook.paper || 'lined', ref.paperColor || 'cream');
+  if (ref.spacing || notebook.spacing) pg.spacing = ref.spacing || notebook.spacing;
   pg.items = [];
   await addPageToNotebook(notebook.id, pg, index + 1);
   notebook.pageIds.splice(index + 1, 0, pg.id);
@@ -2780,6 +2891,7 @@ async function deletePage(pageId) {
   redoStack = redoStack.filter((op) => op.pageId !== pageId);
   if (notebook.pageIds.length < 2) {
     const pg = blankPage(notebook.id, notebook.paper || 'lined');
+    if (notebook.spacing) pg.spacing = notebook.spacing;
     pg.items = [];
     await addPageToNotebook(notebook.id, pg);
     notebook.pageIds.push(pg.id);
@@ -2794,13 +2906,15 @@ async function deletePage(pageId) {
 function templateSheet(pageId) {
   const targetPages = pageId ? [pages.get(pageId)] : notebook.pageIds.map((id) => pages.get(id)).filter((p) => !isCover(p));
   const first = targetPages[0];
-  let chosen = first.paper || 'lined';
+  let chosen = normPaper(first).paper;
+  let spacing = normPaper(first).spacing;
   let color = first.paperColor || 'cream';
 
   const d = document.createElement('dialog');
   d.className = 'sheet';
   d.innerHTML = `<h2></h2>
     <div class="field"><span>Template</span><div class="papers papers-6"></div></div>
+    <div class="field spacing-field"><span>Spacing</span><div class="segmented spacing-seg"></div></div>
     <div class="field"><span>Paper colour</span><div class="swatches paper-colors"></div></div>
     <div class="actions"><button type="button" class="btn btn-ghost" data-cancel>Cancel</button>
     <button type="button" class="btn btn-primary" data-ok>Apply</button></div>`;
@@ -2818,10 +2932,21 @@ function templateSheet(pageId) {
       b.setAttribute('aria-checked', String(t.id === chosen));
       const sw = document.createElement('span');
       sw.className = 'paper-swatch';
-      applyPaper(sw, { paper: t.id, paperColor: color }, notebook, 0.09);
+      applyPaper(sw, { paper: t.id, paperColor: color, spacing }, notebook, 4);
       b.append(sw, document.createTextNode(t.label));
       b.addEventListener('click', () => { chosen = t.id; render(); });
       grid.appendChild(b);
+    }
+    const seg = d.querySelector('.spacing-seg');
+    seg.replaceChildren();
+    d.querySelector('.spacing-field').hidden = !hasSpacing(chosen);
+    for (const sp of SPACINGS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = sp.label;
+      b.setAttribute('aria-checked', String(sp.id === spacing));
+      b.addEventListener('click', () => { spacing = sp.id; render(); });
+      seg.appendChild(b);
     }
     colors.replaceChildren();
     for (const c of PAPER_COLORS) {
@@ -2842,8 +2967,8 @@ function templateSheet(pageId) {
   d.querySelector('[data-cancel]').addEventListener('click', () => d.close());
   d.querySelector('[data-ok]').addEventListener('click', async () => {
     d.close();
-    for (const pg of targetPages) { pg.paper = chosen; pg.paperColor = color; }
-    if (!pageId) await updateNotebook(notebook.id, { paper: chosen }, { touch: false });
+    for (const pg of targetPages) { pg.paper = chosen; pg.paperColor = color; pg.spacing = spacing; }
+    if (!pageId) await updateNotebook(notebook.id, { paper: chosen, spacing }, { touch: false });
     await savePages(targetPages);
     relayout();
     if (!els.thumbs.hidden) buildThumbs();

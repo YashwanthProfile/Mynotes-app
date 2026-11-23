@@ -58,18 +58,21 @@
   <!-- Notebook editor -->
   <section id="notebook-view" class="view mode-read" hidden>
     <header class="topbar editor-top">
-      <button id="back-btn" class="icon-btn" type="button" aria-label="Back to library"></button>
-      <button id="thumbs-btn" class="icon-btn" type="button" aria-label="Page overview"></button>
-      <button id="search-btn" class="icon-btn" type="button" aria-label="Search in notebook"></button>
+      <div class="et-side et-left">
+        <button id="back-btn" class="icon-btn" type="button" aria-label="Back to library"></button>
+        <button id="thumbs-btn" class="icon-btn" type="button" aria-label="Page overview"></button>
+        <button id="search-btn" class="icon-btn" type="button" aria-label="Search in notebook"></button>
+      </div>
       <button id="notebook-title" class="title-btn" type="button" aria-label="Rename notebook"></button>
-      <button id="page-indicator" class="page-indicator" type="button" aria-label="Show pages"></button>
-      <button id="undo-btn" class="icon-btn edit-only" type="button" aria-label="Undo"></button>
-      <button id="redo-btn" class="icon-btn edit-only" type="button" aria-label="Redo"></button>
-      <button id="mode-btn" class="mode-btn" type="button" aria-label="Switch between reading and editing"></button>
-      <button id="present-btn" class="icon-btn" type="button" aria-label="Presentation mode"></button>
-      <button id="editor-more-btn" class="icon-btn" type="button" aria-label="Notebook options"></button>
+      <div id="toolbar" class="toolbar edit-only" role="toolbar" aria-label="Writing tools"></div>
+      <div class="et-side et-right">
+        <button id="mode-btn" class="mode-btn" type="button" aria-label="Switch between reading and editing"></button>
+        <button id="add-page-btn" class="icon-btn" type="button" aria-label="Add page"></button>
+        <button id="export-btn" class="icon-btn" type="button" aria-label="Export"></button>
+        <button id="present-btn" class="icon-btn" type="button" aria-label="Presentation mode"></button>
+        <button id="editor-more-btn" class="icon-btn" type="button" aria-label="Notebook options"></button>
+      </div>
     </header>
-    <div id="toolbar" class="toolbar edit-only" role="toolbar" aria-label="Writing tools"></div>
     <div id="stage" class="stage">
       <aside id="thumbs" class="thumbs" aria-label="Pages" hidden></aside>
       <main id="pages" class="pages"><div id="pages-inner" class="pages-inner"></div></main>
@@ -81,6 +84,12 @@
       </div>
       <div id="pull-hint" class="pull-hint" hidden><span class="pull-ring"></span><span class="pull-text">Pull up to add a page</span></div>
       <div id="zoom-badge" class="zoom-badge" hidden></div>
+      <div id="tool-options" class="tool-options edit-only" role="toolbar" aria-label="Tool options"></div>
+      <div class="float-undo edit-only">
+        <button id="undo-btn" class="icon-btn" type="button" aria-label="Undo"></button>
+        <button id="redo-btn" class="icon-btn" type="button" aria-label="Redo"></button>
+      </div>
+      <button id="page-indicator" class="page-indicator" type="button" aria-label="Show pages"></button>
       <div id="present-bar" class="present-bar" role="toolbar" aria-label="Presentation tools" hidden></div>
     </div>
     <div id="pen-popover" class="popover" hidden></div>

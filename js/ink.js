@@ -114,38 +114,26 @@ function addPenShape(ctx, pts, R, from, to) {
   const m = xs.length;
   if (!m) return;
   const circle = (i) => { ctx.moveTo(xs[i] + rs[i], ys[i]); ctx.arc(xs[i], ys[i], rs[i], 0, Math.PI * 2); };
+  // Every piece is convex and wound the same way as arc(), so the nonzero
+  // fill merges them into one solid shape with no cracks.
   circle(0);
-  if (m === 1) return;
-  // Normal at each sample, averaged from its two segments so neighbouring quads share edges.
-  const nx = new Float64Array(m), ny = new Float64Array(m);
-  const dx = new Float64Array(m - 1), dy = new Float64Array(m - 1);
   for (let i = 0; i < m - 1; i++) {
     const ex = xs[i + 1] - xs[i], ey = ys[i + 1] - ys[i];
-    const l = Math.hypot(ex, ey) || 1;
-    dx[i] = ex / l; dy[i] = ey / l;
+    const l = Math.hypot(ex, ey);
+    if (l > 1e-6) {
+      const nx = -ey / l, ny = ex / l;
+      const ax = xs[i] + nx * rs[i], ay = ys[i] + ny * rs[i];
+      const bx = xs[i + 1] + nx * rs[i + 1], by = ys[i + 1] + ny * rs[i + 1];
+      const cx = xs[i + 1] - nx * rs[i + 1], cy = ys[i + 1] - ny * rs[i + 1];
+      const qx = xs[i] - nx * rs[i], qy = ys[i] - ny * rs[i];
+      const area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+      ctx.moveTo(ax, ay);
+      if (area >= 0) { ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.lineTo(qx, qy); }
+      else { ctx.lineTo(qx, qy); ctx.lineTo(cx, cy); ctx.lineTo(bx, by); }
+      ctx.closePath();
+    }
+    circle(i + 1);
   }
-  for (let i = 0; i < m; i++) {
-    const a = Math.max(0, i - 1), b = Math.min(m - 2, i);
-    let tx = dx[a] + dx[b], ty = dy[a] + dy[b];
-    const l = Math.hypot(tx, ty);
-    if (l < 0.3) { tx = dx[b]; ty = dy[b]; } else { tx /= l; ty /= l; }
-    nx[i] = -ty; ny[i] = tx;
-    // Sharp turns pinch the averaged normal, so a round joint fills them in.
-    if (i > 0 && i < m - 1 && dx[i - 1] * dx[i] + dy[i - 1] * dy[i] < 0.8) circle(i);
-  }
-  for (let i = 0; i < m - 1; i++) {
-    const ax = xs[i] + nx[i] * rs[i], ay = ys[i] + ny[i] * rs[i];
-    const bx = xs[i + 1] + nx[i + 1] * rs[i + 1], by = ys[i + 1] + ny[i + 1] * rs[i + 1];
-    const cx = xs[i + 1] - nx[i + 1] * rs[i + 1], cy = ys[i + 1] - ny[i + 1] * rs[i + 1];
-    const qx = xs[i] - nx[i] * rs[i], qy = ys[i] - ny[i] * rs[i];
-    // Same winding as arc() so the nonzero fill joins everything into one shape.
-    const area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
-    ctx.moveTo(ax, ay);
-    if (area >= 0) { ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.lineTo(qx, qy); }
-    else { ctx.lineTo(qx, qy); ctx.lineTo(cx, cy); ctx.lineTo(bx, by); }
-    ctx.closePath();
-  }
-  circle(m - 1);
 }
 
 function linePath(ctx, pts) {

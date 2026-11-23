@@ -7,6 +7,7 @@ import { showToast, openMenu, confirmSheet, promptSheet, pickSheet, ICONS } from
 import { initEditor, openEditor, closeEditor, renderCoverThumb } from './editor.js';
 import { TEMPLATES, applyPaper } from './templates.js';
 import { getPage } from './db.js';
+import { importBackup } from './export.js';
 
 const COVERS = ['#2f6fdf', '#1f9d8b', '#e0a526', '#d9503f', '#8a5cd6', '#3d4a5c', '#c46a9b', '#6a9f3a', '#1c1c1e', '#b0743c'];
 const FOLDER_COLORS = ['#5b9df9', '#4cc3d9', '#55c27a', '#f5c33b', '#f59a3b', '#ef6461', '#e86fae', '#9b7bf0', '#8e8e93', '#3d4a5c'];
@@ -310,7 +311,26 @@ function newMenu() {
   openMenu('', [
     { icon: ICONS.cover, label: 'Notebook', onClick: openCreateDialog },
     { icon: ICONS.folder, label: 'Folder', onClick: newFolder },
+    { icon: ICONS.importFile, label: 'Import backup', onClick: pickBackup },
   ], els.newBtn);
+}
+
+function pickBackup() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.addEventListener('change', async () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    try {
+      const nb = await importBackup(f, state.folderId);
+      showToast(`Imported “${nb.title}”`);
+      renderLibrary();
+    } catch (e) {
+      console.error(e);
+      showToast('That file is not a MyNotes backup');
+    }
+  });
+  input.click();
 }
 
 async function newFolder() {
@@ -536,7 +556,7 @@ function renderPickers() {
     b.setAttribute('aria-checked', String(p.id === state.paper));
     const sw = document.createElement('span');
     sw.className = 'paper-swatch';
-    applyPaper(sw, { paper: p.id, paperColor: 'cream' }, null, 0.09);
+    applyPaper(sw, { paper: p.id, paperColor: 'cream' }, null, 4);
     b.append(sw, document.createTextNode(p.label));
     b.addEventListener('click', () => { state.paper = p.id; renderPickers(); });
     els.paperOptions.appendChild(b);

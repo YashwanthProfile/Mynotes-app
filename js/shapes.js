@@ -210,6 +210,42 @@ function closedPolygon(pts, D) {
   return poly;
 }
 
+
+// ---------- Angle snapping ----------
+const DEG = Math.PI / 180;
+
+// Snaps an angle to the nearest multiple of `step` when it is within `tol`.
+export function snapAngle(ang, step = 45 * DEG, tol = 6 * DEG) {
+  const k = Math.round(ang / step) * step;
+  return Math.abs(ang - k) < tol ? k : ang;
+}
+
+// Line from a to b, turned about its middle onto 0/45/90 degrees when close.
+function snapLine(a, b) {
+  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const s = snapAngle(ang);
+  if (s === ang) return [a, b];
+  const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, h = Math.hypot(b[0] - a[0], b[1] - a[1]) / 2;
+  return [[mx - Math.cos(s) * h, my - Math.sin(s) * h], [mx + Math.cos(s) * h, my + Math.sin(s) * h]];
+}
+
+// Turns a closed polygon so its longest side sits level (or upright) when it nearly does.
+function levelPolygon(poly) {
+  let best = 0, ang = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    const l = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    if (l > best) { best = l; ang = Math.atan2(q[1] - p[1], q[0] - p[0]); }
+  }
+  const d = snapAngle(ang, 90 * DEG, 7 * DEG) - ang;
+  if (!d) return poly;
+  let cx = 0, cy = 0;
+  for (const p of poly) { cx += p[0]; cy += p[1]; }
+  cx /= poly.length; cy /= poly.length;
+  const c = Math.cos(d), sn = Math.sin(d);
+  return poly.map(([x, y]) => [cx + (x - cx) * c - (y - cy) * sn, cy + (x - cx) * sn + (y - cy) * c]);
+}
+
 export function recognize(points, { lineOnly = false } = {}) {
   const n = points.length / 3;
   if (n < 4) return null;
@@ -225,11 +261,11 @@ export function recognize(points, { lineOnly = false } = {}) {
   let maxDev = 0, sumDev = 0;
   for (const p of pts) { const d = distToSeg(p, a, b); maxDev = Math.max(maxDev, d); sumDev += d; }
   if (chord > 0.7 * total && maxDev < Math.max(4, chord * 0.12) && sumDev / pts.length < Math.max(2, chord * 0.05)) {
-    return { kind: 'line', points: densify([a, b], false) };
+    return { kind: 'line', points: densify(snapLine(a, b), false) };
   }
   if (lineOnly) {
     // Highlighters: snap a roughly straight swipe even if it wobbles a bit more.
-    if (chord > 0.6 * total && maxDev < Math.max(8, chord * 0.18)) return { kind: 'line', points: densify([a, b], false) };
+    if (chord > 0.6 * total && maxDev < Math.max(8, chord * 0.18)) return { kind: 'line', points: densify(snapLine(a, b), false) };
     return null;
   }
 
@@ -246,10 +282,11 @@ export function recognize(points, { lineOnly = false } = {}) {
     if (poly && polyErr < 0.035 && polyErr < ellErr * need) {
       let shape = { poly, kind: poly.length === 3 ? 'triangle' : 'polygon' };
       if (poly.length === 4) shape = tidyQuad(poly);
-      return { kind: shape.kind, points: densify(shape.poly, true) };
+      return { kind: shape.kind, points: densify(levelPolygon(shape.poly), true) };
     }
     if (ellErr < 0.05) {
       const e = { ...ell };
+      e.ang = snapAngle(e.ang, 90 * DEG, 8 * DEG);
       if (Math.abs(e.a / e.b - 1) < 0.14) { e.a = e.b = (e.a + e.b) / 2; return { kind: 'circle', points: ellipsePoints(e) }; }
       return { kind: 'ellipse', points: ellipsePoints(e) };
     }

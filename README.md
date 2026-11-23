@@ -17,13 +17,15 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 - Pinch to zoom, continuous page scrolling, pull up past the last page to add one
 - Pages panel in two columns with bookmarks and a bookmarked-only filter
 - Every notebook starts with a cover page you can write on, shown in the library
-- Six page templates (blank, lined, narrow, grid, dotted, Cornell) and paper colours, per page or whole notebook
+- Page templates (blank, ruled, plain lines, grid, dots, Cornell) in small, medium or large spacing, drawn sharp and soft at every zoom
+- Export a notebook or page as PDF, a page as an image, or the whole notebook as a backup file you can import again
+- Snapping: lines to level, upright and 45°, shapes to level, and selections to page centre, edges and other objects with guides
 - Opens read-only by default with an Edit switch, plus a presentation mode with a floating toolbar
 - Folders (nested) with colours, multi-select, move, rename and a Trash that keeps items for 30 days
 - Light, dark or system appearance, and an option to draw with a finger
 - Works offline once installed, and installs to the iPad Home Screen
 
-Coming next: export and backup, Google Drive sync, PDF import.
+Coming next: Google Drive sync, PDF import.
 
 ## Install on iPad
 
@@ -60,6 +62,7 @@ js/ink.js               Pen types, stroke drawing, laser and eraser hit testing
 js/items.js             Text boxes, images and sticky notes
 js/shapes.js            Hold-to-snap shape recognition
 js/fill.js              Colour fill
+js/export.js            PDF, image and backup export / import
 js/templates.js         Page templates and paper colours
 js/ui.js                Shared menus, dialogs and icons
 js/settings.js          Per-device preferences
