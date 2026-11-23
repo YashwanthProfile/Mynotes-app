@@ -4,37 +4,46 @@ import {
   addPageToNotebook, removePageFromNotebook, newId,
 } from './db.js';
 import {
-  PAGE_W, PAGE_H, PEN_TYPES, LINE_STYLES, drawStroke, drawStrokes, computeBBox, hitStroke, drawLaser, LASER_LIFE,
+  PAGE_W, PAGE_H, PEN_TYPES, LINE_STYLES, drawStroke, drawStrokes, computeBBox, hitStroke, drawLaser, drawLaserDot,
+  LASER_LIFE, isSolidPen, strokeRadii, liveLag, drawPenRange,
 } from './ink.js';
+import { recognize, toFlat } from './shapes.js';
+import { findFillArea } from './fill.js';
 import {
   STICKY_COLORS, TEXT_SIZES, TEXT_COLORS, selectionMatrix, applyM, itemBBox, itemCenter, hitItem, toItemLocal,
   transformItem, newTextItem, newStickyItem, imageItemFromFile, renderItem, drawItems, blobUrl,
 } from './items.js';
 import { TEMPLATES, PAPER_COLORS, applyPaper } from './templates.js';
-import { getSettings, onSettingsChange } from './settings.js';
+import { getSettings, setSetting, onSettingsChange } from './settings.js';
 import { openMenu, confirmSheet, promptSheet, showToast, ICONS } from './ui.js';
 
 // ---------- Tool configuration ----------
 
-const PALETTES = {
-  pen: ['#1d1d1f', '#2456c9', '#d33a2c', '#1f8a5b', '#8a4fd6', '#ffffff'],
-  highlighter: ['#ffd93b', '#7be08a', '#ff8fc7', '#78c3ff', '#ffab4d'],
-};
+// Colour grid: neutrals, then deep, standard and light rows of the same hues.
+export const PALETTE = [
+  '#000000', '#3a3a3c', '#6e6e73', '#aeaeb2', '#d1d1d6', '#ffffff', '#5b3a1e', '#8b5a2b', '#c8a27a',
+  '#0b3d91', '#005f73', '#1b5e20', '#8d6e00', '#b34700', '#9b1c1c', '#8e1450', '#4a148c', '#1a237e',
+  '#1f5bd8', '#0a9396', '#2e9e4f', '#e9b10c', '#f57c00', '#e53935', '#e91e63', '#8e44d9', '#3949ab',
+  '#6ea8fe', '#64d2c8', '#8bd17c', '#ffe066', '#ffb562', '#ff8a80', '#f48fb1', '#c39bf0', '#9fa8da',
+];
+const SLOT_TOOLS = ['pen', 'highlighter', 'fill'];
 const SIZES = {
   pen: [2, 3.5, 6],
   highlighter: [14, 22, 34],
   eraser: [10, 22, 44],
 };
-const ALL_TOOLS = ['lasso', 'pen', 'highlighter', 'eraser', 'laser', 'text', 'sticky'];
+const ALL_TOOLS = ['lasso', 'pen', 'highlighter', 'eraser', 'fill', 'laser', 'text', 'sticky'];
 const TOOL_NAMES = {
-  lasso: 'Lasso select', pen: 'Pen', highlighter: 'Highlighter', eraser: 'Eraser', laser: 'Laser pointer',
+  lasso: 'Lasso select', pen: 'Pen', highlighter: 'Highlighter', eraser: 'Eraser', fill: 'Fill', laser: 'Laser pointer',
   text: 'Text', sticky: 'Sticky note', image: 'Insert image',
 };
 const TOOLS_KEY = 'mynotes-tools';
 const DEFAULT_TOOLS = {
   tool: 'pen',
-  pen: { color: PALETTES.pen[0], size: SIZES.pen[1], custom: '#e05a00', type: 'fountain', dash: 'solid', stab: 0 },
-  highlighter: { color: PALETTES.highlighter[0], size: SIZES.highlighter[1], custom: '#c9a0ff' },
+  recent: [],
+  pen: { slots: ['#000000', '#1f5bd8', '#e53935'], slot: 0, color: '#000000', size: SIZES.pen[1], type: 'fountain', dash: 'solid', stab: 0 },
+  highlighter: { slots: ['#ffe066', '#8bd17c', '#f48fb1'], slot: 0, color: '#ffe066', size: SIZES.highlighter[1] },
+  fill: { slots: ['#6ea8fe', '#ffe066', '#ff8a80'], slot: 0, color: '#6ea8fe' },
   eraser: { size: SIZES.eraser[1] },
   laser: { mode: 'trail' },
   text: { size: 30, color: TEXT_COLORS[0] },
@@ -50,8 +59,15 @@ function loadTools() {
         if (k !== 'tool' && saved[k] && typeof saved[k] === 'object') Object.assign(t[k], saved[k]);
       }
       if (ALL_TOOLS.includes(saved.tool)) t.tool = saved.tool;
+      if (Array.isArray(saved.recent)) t.recent = saved.recent.slice(0, 9);
     }
   } catch { /* ignore */ }
+  for (const k of SLOT_TOOLS) {
+    const cfg = t[k];
+    if (!Array.isArray(cfg.slots) || cfg.slots.length !== 3) cfg.slots = DEFAULT_TOOLS[k].slots.slice();
+    cfg.slot = Math.max(0, Math.min(2, cfg.slot | 0));
+    cfg.color = cfg.slots[cfg.slot];
+  }
   return t;
 }
 function saveTools() {
@@ -59,9 +75,9 @@ function saveTools() {
 }
 
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 4;
+const MAX_ZOOM = 6;
 const LOW_CAP = 2048;          // max pixel width of a whole-page canvas
-const PAGE_GAP_TOP = 20;
+const PAGE_GAP_TOP = 6;
 const PULL_DISTANCE = 110;
 
 let tools = loadTools();
@@ -97,8 +113,7 @@ let sel = null;              // current selection
 let clipboard = null;        // { strokes, items }
 let editing = null;          // text or sticky being typed in
 let cropping = null;         // image being cropped
-const liveCanvas = document.createElement('canvas');
-liveCanvas.className = 'live';
+let hiScrollTimer = null;
 
 const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
 const isCover = (pg) => !!pg && pg.kind === 'cover';
@@ -129,14 +144,25 @@ export function initEditor({ onClose }) {
     zoomBadge: $('zoom-badge'),
     presentBar: $('present-bar'),
     popover: $('pen-popover'),
-    colorInput: $('custom-color'),
     imageInput: $('image-input'),
+    wet: $('ink-wet'),
+    searchBtn: $('search-btn'),
+    searchPanel: $('search-panel'),
+    searchInput: $('search-input'),
+    searchResults: $('search-results'),
+    tail: $('ink-tail'),
   };
   els.undo.innerHTML = ICONS.undo;
   els.redo.innerHTML = ICONS.redo;
   els.thumbsBtn.innerHTML = ICONS.pages;
   els.presentBtn.innerHTML = ICONS.present;
   els.moreBtn.innerHTML = ICONS.more;
+  els.searchBtn.innerHTML = ICONS.search;
+  els.back.innerHTML = ICONS.back;
+  els.searchBtn.addEventListener('click', toggleSearch);
+  els.searchInput.addEventListener('input', renderSearch);
+  els.searchInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSearch(); });
+  els.presentBar.addEventListener('pointerdown', () => pokePresentBar(true));
 
   els.back.addEventListener('click', () => onCloseCb && onCloseCb());
   els.undo.addEventListener('click', undo);
@@ -147,14 +173,6 @@ export function initEditor({ onClose }) {
   els.presentBtn.addEventListener('click', enterPresent);
   els.moreBtn.addEventListener('click', notebookMenu);
   els.title.addEventListener('click', renameNotebook);
-  els.colorInput.addEventListener('input', () => {
-    const t = tools.tool;
-    if (!tools[t] || !('custom' in tools[t])) return;
-    tools[t].custom = els.colorInput.value;
-    tools[t].color = els.colorInput.value;
-    saveTools();
-    renderToolbar();
-  });
   els.imageInput.addEventListener('change', onImagePicked);
 
   const p = els.pages;
@@ -193,6 +211,8 @@ export function initEditor({ onClose }) {
     else if (presenting && ['ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key)) goToPage(currentPageIndex() - 1);
   });
   onSettingsChange(applyFingerMode);
+  onSettingsChange(() => { if (notebook) applyDarkPages(); });
+  if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (notebook) applyDarkPages(); });
   applyFingerMode();
   renderToolbar();
 }
@@ -234,6 +254,8 @@ export async function openEditor(notebookId) {
   els.title.textContent = nb.title;
   els.thumbs.hidden = true;
   els.thumbsBtn.classList.remove('active');
+  closeSearch();
+  applyDarkPages();
   setMode(getSettings().openMode === 'edit' ? 'edit' : 'read', { quiet: true });
   buildPages();
   updateUndoButtons();
@@ -273,12 +295,118 @@ async function renameNotebook() {
 }
 
 function notebookMenu() {
-  openMenu(notebook.title, [
-    { label: 'Change template for all pages', onClick: () => templateSheet(null) },
-    { label: 'Add page at the end', onClick: () => addPageAfter(notebook.pageIds.length - 1) },
-    { label: 'Presentation mode', onClick: enterPresent },
-    { label: 'Rename notebook', onClick: renameNotebook },
-  ]);
+  const idx = currentPageIndex();
+  const pageId = notebook.pageIds[idx];
+  const dark = darkPagesOn();
+  openMenu(pageLabel(idx), [
+    ...pageMenuItems(pageId),
+    { sep: true },
+    { icon: ICONS.template, label: 'Template for all pages', onClick: () => templateSheet(null) },
+    { icon: ICONS.moon, label: dark ? 'Light pages' : 'Dark pages', onClick: () => setSetting('darkPages', dark ? 'off' : 'on') },
+    { icon: ICONS.present, label: 'Present', onClick: enterPresent },
+    { icon: ICONS.rename, label: 'Rename notebook', onClick: renameNotebook },
+  ], els.moreBtn);
+}
+
+function darkPagesOn() {
+  const d = getSettings().darkPages;
+  if (d === 'on') return true;
+  if (d !== 'auto') return false;
+  const t = document.documentElement.dataset.theme;
+  if (t === 'dark') return true;
+  if (t === 'light') return false;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function applyDarkPages() {
+  const on = darkPagesOn();
+  els.view.classList.toggle('dark-pages', on);
+  if (!els.thumbs.hidden && notebook) buildThumbs();
+}
+
+// ---------- Search ----------
+
+function toggleSearch() {
+  if (!els.searchPanel.hidden) { closeSearch(); return; }
+  els.searchPanel.hidden = false;
+  els.searchBtn.classList.add('active');
+  els.searchInput.value = '';
+  renderSearch();
+  els.searchInput.focus();
+}
+
+function closeSearch() {
+  els.searchPanel.hidden = true;
+  els.searchBtn.classList.remove('active');
+  els.searchInput.blur();
+}
+
+function renderSearch() {
+  const q = els.searchInput.value.trim().toLowerCase();
+  const out = els.searchResults;
+  out.replaceChildren();
+  if (!q) {
+    const p = document.createElement('p');
+    p.className = 'search-note';
+    p.textContent = 'Finds typed text and sticky notes. Handwriting is not searchable yet.';
+    out.appendChild(p);
+    return;
+  }
+  let count = 0;
+  notebook.pageIds.forEach((id, i) => {
+    const pg = pages.get(id);
+    for (const it of pg.items || []) {
+      if (!it.text) continue;
+      const lower = it.text.toLowerCase();
+      const at = lower.indexOf(q);
+      if (at < 0) continue;
+      count++;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'search-hit';
+      const where = document.createElement('span');
+      where.className = 'search-where';
+      where.textContent = pageLabel(i);
+      const snip = document.createElement('span');
+      snip.className = 'search-snip';
+      const from = Math.max(0, at - 30);
+      const pre = (from > 0 ? '…' : '') + it.text.slice(from, at);
+      const mark = document.createElement('mark');
+      mark.textContent = it.text.slice(at, at + q.length);
+      snip.append(document.createTextNode(pre), mark, document.createTextNode(it.text.slice(at + q.length, at + q.length + 60)));
+      b.append(where, snip);
+      b.addEventListener('click', () => {
+        goToPage(i);
+        setTimeout(() => {
+          const el = itemEl(id, it.id);
+          if (el) { el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600); }
+        }, 350);
+      });
+      out.appendChild(b);
+    }
+  });
+  if (!count) {
+    const p = document.createElement('p');
+    p.className = 'search-note';
+    p.textContent = 'No matches.';
+    out.appendChild(p);
+  }
+}
+
+// ---------- Presentation bar ----------
+// The bar fades away while presenting so the audience only sees the page.
+// A finger tap brings it back for a few seconds.
+
+let presentBarTimer = 0;
+function pokePresentBar(show = true) {
+  if (!presenting) return;
+  if (show) els.presentBar.classList.remove('faded');
+  clearTimeout(presentBarTimer);
+  presentBarTimer = setTimeout(hidePresentBar, 2600);
+}
+function hidePresentBar() {
+  clearTimeout(presentBarTimer);
+  els.presentBar.classList.add('faded');
 }
 
 // ---------- Modes ----------
@@ -319,6 +447,9 @@ function enterPresent() {
   renderToolbar();
   renderPresentBar();
   els.presentBar.hidden = false;
+  closeSearch();
+  pokePresentBar(true);
+  showToast('Tap with a finger to show the tools');
   try {
     const el = document.documentElement;
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
@@ -339,6 +470,8 @@ function exitPresent() {
   presenting = false;
   document.body.classList.remove('presenting');
   els.presentBar.hidden = true;
+  els.presentBar.classList.remove('faded');
+  clearTimeout(presentBarTimer);
   zoom = savedBeforePresent ? savedBeforePresent.zoom : 1;
   if (savedBeforePresent) { tools.tool = savedBeforePresent.tool; renderToolbar(); }
   setMode(savedBeforePresent ? savedBeforePresent.mode : 'read', { quiet: true });
@@ -380,15 +513,15 @@ function renderPresentBar() {
     bar.appendChild(chip);
   }
   sep();
-  for (const c of ['#d33a2c', '#2456c9', '#1d1d1f']) {
+  tools.pen.slots.forEach((c, i) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'color-btn' + (tools.pen.color === c && tools.tool === 'pen' ? ' active' : '');
+    b.className = 'color-btn' + (tools.pen.slot === i && tools.tool === 'pen' ? ' active' : '');
     b.style.setProperty('--c', c);
     b.setAttribute('aria-label', `Pen colour ${c}`);
-    b.addEventListener('click', () => { tools.pen.color = c; tools.tool = 'pen'; saveTools(); renderToolbar(); renderPresentBar(); });
+    b.addEventListener('click', () => { tools.pen.slot = i; tools.pen.color = c; tools.tool = 'pen'; saveTools(); renderToolbar(); renderPresentBar(); });
     bar.appendChild(b);
-  }
+  });
   sep();
   btn(ICONS.undo, 'Undo', undo);
   btn(ICONS.prev, 'Previous page', () => goToPage(currentPageIndex() - 1));
@@ -405,8 +538,8 @@ function renderPresentBar() {
 // ---------- Layout ----------
 
 function baseWidth() {
-  const avail = els.pages.clientWidth - 32;
-  return Math.max(280, Math.min(avail, 920));
+  const avail = els.pages.clientWidth - 12;
+  return Math.max(280, Math.min(avail, 980));
 }
 
 function fitHeightZoom() {
@@ -441,30 +574,20 @@ function buildPages() {
     uiLayer.className = 'ui-layer';
     wrap.append(itemsLayer, low, hi, uiLayer);
 
-    const footer = document.createElement('div');
-    footer.className = 'page-footer';
-    const mark = document.createElement('span');
-    mark.className = 'footer-mark';
-    mark.innerHTML = ICONS.bookmark;
-    const label = document.createElement('span');
-    label.textContent = pageLabel(i);
-    const more = document.createElement('button');
-    more.type = 'button';
-    more.className = 'icon-btn small page-more';
-    more.innerHTML = ICONS.more;
-    more.setAttribute('aria-label', `${pageLabel(i)} options`);
-    more.addEventListener('click', () => pageMenu(id));
-    footer.append(mark, label, more);
-    footer.classList.toggle('bookmarked', !!pg.bookmarked);
+    const ribbon = document.createElement('span');
+    ribbon.className = 'page-ribbon';
+    ribbon.innerHTML = ICONS.bookmark;
+    ribbon.hidden = !pg.bookmarked;
+    wrap.appendChild(ribbon);
 
-    els.inner.append(wrap, footer);
-    views.set(id, { wrap, itemsLayer, low, hi, uiLayer, footer, visible: false, lowScale: 0, hiShown: false });
+    els.inner.append(wrap);
+    views.set(id, { wrap, itemsLayer, low, hi, uiLayer, ribbon, visible: false, lowScale: 0, hiShown: false, hiRegion: null });
     renderItems(id);
     observer.observe(wrap);
   });
   const pullSpace = document.createElement('div');
   pullSpace.className = 'pull-space';
-  pullSpace.innerHTML = '<span>Pull up past the last page to add a new one</span>';
+  pullSpace.setAttribute('aria-hidden', 'true');
   els.inner.appendChild(pullSpace);
   relayout({ keepScroll: true });
   if (!els.thumbs.hidden) buildThumbs();
@@ -483,7 +606,7 @@ function relayout({ keepIndex = null, anchor = null, keepScroll = false } = {}) 
   const w = baseWidth() * zoom;
   scale = w / PAGE_W;
   const h = PAGE_H * scale;
-  els.inner.style.width = `${Math.max(els.pages.clientWidth, w + 32)}px`;
+  els.inner.style.width = `${Math.max(els.pages.clientWidth, w + 12)}px`;
   for (const [id, v] of views) {
     const pg = pages.get(id);
     v.wrap.style.width = `${w}px`;
@@ -589,35 +712,56 @@ function regionCanvas(canvas, region) {
   return ctx;
 }
 
+// When zoomed in, a sharp canvas covers the visible area plus a margin; the
+// whole-page canvas stays underneath (with a hole cut out) so nothing ever
+// disappears while scrolling or pinching.
 function renderHi(id) {
   const v = views.get(id);
   const pg = pages.get(id);
   if (!v || !pg) return;
   if (!needsHi()) { hideHi(v); return; }
-  const region = visibleRegion(v);
-  if (!region) { hideHi(v); return; }
+  const vis = visibleRegion(v);
+  if (!vis) { hideHi(v); return; }
+  const W = PAGE_W * scale, H = PAGE_H * scale;
+  const r = dpr();
+  let mx = els.pages.clientWidth * 0.3, my = els.pages.clientHeight * 0.3;
+  const budget = 9e6; // device pixels
+  while (mx > 0 && (vis.w + 2 * mx) * (vis.h + 2 * my) * r * r > budget) { mx *= 0.7; my *= 0.7; if (mx < 8) { mx = my = 0; } }
+  const x0 = Math.floor(Math.max(0, vis.x - mx)), y0 = Math.floor(Math.max(0, vis.y - my));
+  const x1 = Math.ceil(Math.min(W, vis.x + vis.w + mx)), y1 = Math.ceil(Math.min(H, vis.y + vis.h + my));
+  const region = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   const ctx = regionCanvas(v.hi, region);
   const clip = [region.x / scale, region.y / scale, (region.x + region.w) / scale, (region.y + region.h) / scale];
   drawStrokes(ctx, pageStrokes(id), clip);
   v.hi.hidden = false;
-  v.low.style.visibility = 'hidden';
+  v.hiRegion = region;
   v.hiShown = true;
+  v.low.style.clipPath = `polygon(evenodd, 0 0, ${W}px 0, ${W}px ${H}px, 0 ${H}px, 0 0, ${x0}px ${y0}px, ${x1}px ${y0}px, ${x1}px ${y1}px, ${x0}px ${y1}px, ${x0}px ${y0}px)`;
 }
 
 function hideHi(v) {
   if (!v.hiShown && v.hi.hidden) return;
   v.hi.hidden = true;
-  v.low.style.visibility = '';
+  v.low.style.clipPath = '';
   v.hiShown = false;
+  v.hiRegion = null;
 }
 
-function scheduleHi() {
+function hiCovers(v) {
+  if (!v.hiShown || !v.hiRegion) return false;
+  const vis = visibleRegion(v);
+  if (!vis) return true;
+  const r = v.hiRegion;
+  return vis.x >= r.x - 1 && vis.y >= r.y - 1 && vis.x + vis.w <= r.x + r.w + 1 && vis.y + vis.h <= r.y + r.h + 1;
+}
+
+function scheduleHi(delay = 120) {
   clearTimeout(hiTimer);
   if (!needsHi()) return;
   hiTimer = setTimeout(() => {
-    if (active) { scheduleHi(); return; }
-    for (const [id, v] of views) if (v.visible) renderHi(id);
-  }, 140);
+    if (active || pinch) { scheduleHi(); return; }
+    for (const [id, v] of views) if (v.visible && !hiCovers(v)) renderHi(id);
+  }, delay);
 }
 
 function rerenderPage(id) {
@@ -625,6 +769,84 @@ function rerenderPage(id) {
   if (!v || !v.visible) return;
   renderLow(id);
   if (v.hiShown) renderHi(id);
+}
+
+// Redraws only part of a page (page units), e.g. after erasing.
+function redrawArea(id, box) {
+  const v = views.get(id);
+  if (!v || !v.visible || !v.lowScale) return;
+  const b = [box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2];
+  const paint = (ctx) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    ctx.clip();
+    ctx.clearRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    drawStrokes(ctx, pageStrokes(id), b);
+    ctx.restore();
+  };
+  const lctx = v.low.getContext('2d');
+  lctx.setTransform(v.lowScale, 0, 0, v.lowScale, 0, 0);
+  paint(lctx);
+  if (v.hiShown) paint(hiContext(v));
+}
+
+function hiContext(v) {
+  const r = dpr();
+  const ctx = v.hi.getContext('2d');
+  ctx.setTransform(r * scale, 0, 0, r * scale, -v.hiRegion.x * r, -v.hiRegion.y * r);
+  return ctx;
+}
+
+// Draws one new stroke onto the page canvases without redrawing the rest.
+function paintStroke(id, stroke) {
+  const v = views.get(id);
+  if (!v || !v.lowScale) return;
+  if (stroke.tool === 'highlighter' || stroke.tool === 'fill') { redrawArea(id, stroke.bbox || computeBBox(stroke)); return; }
+  const lctx = v.low.getContext('2d');
+  lctx.setTransform(v.lowScale, 0, 0, v.lowScale, 0, 0);
+  drawStroke(lctx, stroke);
+  if (v.hiShown) drawStroke(hiContext(v), stroke);
+}
+
+// ---------- Live ink overlay ----------
+// Two screen-sized canvases above the pages: "wet" keeps the finished part of
+// the stroke being written, "tail" holds the last few points (which may still
+// change) plus the predicted points. Each frame only the new bits are drawn.
+
+function syncOverlay() {
+  const p = els.pages;
+  const w = p.clientWidth, h = p.clientHeight;
+  const r = dpr();
+  for (const c of [els.wet, els.tail]) {
+    c.style.left = `${p.offsetLeft}px`;
+    c.style.top = `${p.offsetTop}px`;
+    c.style.width = `${w}px`;
+    c.style.height = `${h}px`;
+    const pw = Math.round(w * r), ph = Math.round(h * r);
+    if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
+  }
+}
+
+function overlayCtx(canvas, wrap) {
+  const r = dpr();
+  const ctx = canvas.getContext('2d');
+  if (wrap) {
+    const pr = els.pages.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    ctx.setTransform(r * scale, 0, 0, r * scale, (wr.left - pr.left) * r, (wr.top - pr.top) * r);
+  } else {
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+  }
+  return ctx;
+}
+
+function clearOverlay(canvas) {
+  const ctx = canvas.getContext('2d');
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
 }
 
 function renderItems(id) {
@@ -647,11 +869,9 @@ function itemEl(pageId, itemId) {
 }
 
 function onScroll() {
-  if (needsHi() && !active) {
-    for (const v of views.values()) hideHi(v);
-    scheduleHi();
-  }
+  if (needsHi() && !active) scheduleHi(90);
   updatePageIndicator();
+  if (presenting) pokePresentBar(false);
 }
 
 function currentPageIndex() {
@@ -897,9 +1117,19 @@ function buildThumbs() {
     mark.innerHTML = ICONS.bookmark;
     mark.setAttribute('aria-label', pg.bookmarked ? 'Remove bookmark' : 'Bookmark page');
     mark.addEventListener('click', () => toggleBookmark(id));
+    if (isCover(pg)) paper.classList.add('is-cover');
+    const foot = document.createElement('div');
+    foot.className = 'thumb-foot';
     const label = document.createElement('span');
     label.textContent = i === 0 ? 'Cover' : String(i);
-    b.append(paper, mark, label);
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'thumb-more';
+    more.innerHTML = ICONS.more;
+    more.setAttribute('aria-label', `${pageLabel(i)} options`);
+    more.addEventListener('click', () => pageMenu(id, more));
+    foot.append(label, more);
+    b.append(paper, mark, foot);
     grid.appendChild(b);
     thumbObserver.observe(b);
   });
@@ -916,7 +1146,7 @@ async function toggleBookmark(pageId) {
   pg.bookmarked = !pg.bookmarked;
   await savePage(pg);
   const v = views.get(pageId);
-  if (v) v.footer.classList.toggle('bookmarked', pg.bookmarked);
+  if (v) v.ribbon.hidden = !pg.bookmarked;
   if (!els.thumbs.hidden) buildThumbs();
   showToast(pg.bookmarked ? 'Bookmarked' : 'Bookmark removed');
 }
@@ -968,6 +1198,11 @@ function renderToolbar() {
     b.setAttribute('aria-pressed', String(tools.tool === t));
     b.addEventListener('click', onClick || (() => {
       if (tools.tool === t && t === 'pen') { togglePenPopover(b); return; }
+      if (tools.tool === t && SLOT_TOOLS.includes(t)) {
+        const cfg = tools[t];
+        openColorPopover(b, cfg.color, (nc) => { cfg.slots[cfg.slot] = nc; cfg.color = nc; saveTools(); renderToolbar(); });
+        return;
+      }
       setTool(t);
     }));
     g.appendChild(b);
@@ -975,7 +1210,7 @@ function renderToolbar() {
   };
 
   const drawGroup = group('tools');
-  for (const t of ['lasso', 'pen', 'highlighter', 'eraser', 'laser']) toolBtn(drawGroup, t);
+  for (const t of ['lasso', 'pen', 'highlighter', 'eraser', 'fill', 'laser']) toolBtn(drawGroup, t);
   const insertGroup = group('tools insert');
   toolBtn(insertGroup, 'text');
   const imgBtn = toolBtn(insertGroup, 'image', () => { finishEditing(); els.imageInput.value = ''; els.imageInput.click(); });
@@ -992,15 +1227,19 @@ function renderToolbar() {
     styleBtn.addEventListener('click', () => togglePenPopover(styleBtn));
     group('style').appendChild(styleBtn);
   }
-  if (t === 'pen' || t === 'highlighter') {
+  if (SLOT_TOOLS.includes(t)) {
     const colorGroup = group('colors');
-    const all = [...PALETTES[t], tools[t].custom];
-    all.forEach((c, i) => {
-      const isCustom = i === all.length - 1;
-      colorGroup.appendChild(colorButton(c, tools[t].color === c, isCustom, () => {
-        if (isCustom && tools[t].color === c) { els.colorInput.value = c; els.colorInput.click(); return; }
-        tools[t].color = c; saveTools(); renderToolbar();
-      }));
+    const cfg = tools[t];
+    cfg.slots.forEach((c, i) => {
+      const b = colorButton(c, cfg.slot === i, false, () => {
+        if (cfg.slot === i) {
+          openColorPopover(b, cfg.color, (nc) => { cfg.slots[i] = nc; cfg.color = nc; saveTools(); renderToolbar(); });
+          return;
+        }
+        cfg.slot = i; cfg.color = c; saveTools(); renderToolbar();
+      });
+      b.classList.add('slot');
+      colorGroup.appendChild(b);
     });
   }
   if (SIZES[t]) {
@@ -1080,6 +1319,126 @@ function colorButton(c, isActive, isCustom, onClick) {
   return b;
 }
 
+// ---------- Colour picker ----------
+
+function hexToRgb(h) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(h.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rgbToHex([r, g, b]) {
+  return '#' + [r, g, b].map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+}
+function hsvToRgb(h, s, v) {
+  const f = (n) => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return [f(5) * 255, f(3) * 255, f(1) * 255];
+}
+function rgbToHsv([r, g, b]) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) {
+    if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  return [h, mx ? d / mx : 0, mx];
+}
+
+function openColorPopover(anchor, current, onPick) {
+  const pop = els.popover;
+  pop.replaceChildren();
+  pop.className = 'popover color-pop';
+  const pick = (c, close = true) => {
+    onPick(c);
+    if (!PALETTE.includes(c)) {
+      tools.recent = [c, ...tools.recent.filter((x) => x !== c)].slice(0, 9);
+      saveTools();
+    }
+    if (close) pop.hidden = true;
+  };
+  const grid = document.createElement('div');
+  grid.className = 'palette-grid';
+  for (const c of PALETTE) {
+    const b = colorButton(c, c.toLowerCase() === (current || '').toLowerCase(), false, () => pick(c));
+    grid.appendChild(b);
+  }
+  pop.appendChild(grid);
+  if (tools.recent.length) {
+    const t = document.createElement('div');
+    t.className = 'pop-title';
+    t.textContent = 'Recent';
+    const row = document.createElement('div');
+    row.className = 'palette-grid';
+    for (const c of tools.recent) row.appendChild(colorButton(c, c === current, false, () => pick(c)));
+    pop.append(t, row);
+  }
+  const t2 = document.createElement('div');
+  t2.className = 'pop-title';
+  t2.textContent = 'Custom';
+  pop.appendChild(t2);
+
+  let [h, sv, vv] = rgbToHsv(hexToRgb(current || '#1f5bd8') || [31, 91, 216]);
+  const area = document.createElement('div');
+  area.className = 'sv-area';
+  const knob = document.createElement('div');
+  knob.className = 'sv-knob';
+  area.appendChild(knob);
+  const hue = document.createElement('div');
+  hue.className = 'hue-bar';
+  const hk = document.createElement('div');
+  hk.className = 'hue-knob';
+  hue.appendChild(hk);
+  const row = document.createElement('div');
+  row.className = 'custom-row';
+  const swatch = document.createElement('span');
+  swatch.className = 'custom-swatch';
+  const hex = document.createElement('input');
+  hex.type = 'text';
+  hex.className = 'hex-input';
+  hex.maxLength = 7;
+  hex.autocomplete = 'off';
+  hex.spellcheck = false;
+  const use = document.createElement('button');
+  use.type = 'button';
+  use.className = 'btn btn-primary btn-small';
+  use.textContent = 'Use';
+  row.append(swatch, hex, use);
+  pop.append(area, hue, row);
+
+  const cur = () => rgbToHex(hsvToRgb(h, sv, vv));
+  const paint = (fromHex = false) => {
+    area.style.setProperty('--hue', `hsl(${h}, 100%, 50%)`);
+    knob.style.left = `${sv * 100}%`;
+    knob.style.top = `${(1 - vv) * 100}%`;
+    hk.style.left = `${(h / 360) * 100}%`;
+    swatch.style.background = cur();
+    if (!fromHex) hex.value = cur();
+  };
+  const drag = (el, fn) => {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      const move = (ev) => { const r = el.getBoundingClientRect(); fn(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height))); paint(); };
+      move(e);
+      const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up); };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
+  };
+  drag(area, (x, y) => { sv = x; vv = 1 - y; });
+  drag(hue, (x) => { h = x * 359.9; });
+  hex.addEventListener('input', () => {
+    const rgb = hexToRgb(hex.value.startsWith('#') ? hex.value : `#${hex.value}`);
+    if (rgb) { [h, sv, vv] = rgbToHsv(rgb); paint(true); }
+  });
+  use.addEventListener('click', () => pick(cur()));
+  paint();
+  pop.hidden = false;
+  positionPopover(anchor);
+}
+
 function segmented(options, value, onPick) {
   const seg = document.createElement('div');
   seg.className = 'segmented mini';
@@ -1113,6 +1472,7 @@ function positionPopover(anchor) {
 function stylePopover(anchor, { values, onChange, showStab, color }) {
   const pop = els.popover;
   pop.replaceChildren();
+  pop.className = 'popover';
   const preview = document.createElement('canvas');
   preview.className = 'pen-preview';
   const drawPreview = () => {
@@ -1207,6 +1567,9 @@ function pressureOf(e) {
 }
 
 function onPointerDown(e) {
+  // A Pencil lift that Safari never reported must not block the next stroke.
+  if (active && e.pointerType === 'pen' && e.pointerId !== active.pointerId) finishInteraction();
+  if (presenting && e.pointerType === 'touch' && !e.target.closest('.present-bar')) pokePresentBar(true);
   if (!notebook || active || pinch) return;
   if (mode !== 'edit') return;
   const target = e.target;
@@ -1263,13 +1626,21 @@ function onPointerDown(e) {
     return;
   }
 
+  if (tools.tool === 'fill') { clearSelection(); fillAt(pageId, px, py); return; }
+
   clearSelection();
   try { els.pages.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-  const region = visibleRegion(v) || { x: 0, y: 0, w: rect.width, h: rect.height };
-  if (liveCanvas.parentNode !== wrap) wrap.insertBefore(liveCanvas, v.uiLayer);
-  const liveCtx = regionCanvas(liveCanvas, region);
-
-  const base = { pointerId: e.pointerId, pointerType: e.pointerType, pageId, rect, liveCtx };
+  syncOverlay();
+  clearOverlay(els.wet);
+  clearOverlay(els.tail);
+  const darkInk = darkPagesOn() && !isCover(pg);
+  els.wet.classList.toggle('dark-ink', darkInk);
+  els.tail.classList.toggle('dark-ink', darkInk && tools.tool !== 'laser');
+  els.wet.classList.toggle('hl', tools.tool === 'highlighter');
+  const base = {
+    pointerId: e.pointerId, pointerType: e.pointerType, pageId, rect, wrap,
+    wetCtx: overlayCtx(els.wet, wrap), tailCtx: overlayCtx(els.tail, wrap),
+  };
   if (tools.tool === 'lasso') {
     active = { ...base, kind: 'lasso', pts: [[px, py]] };
   } else if (tools.tool === 'eraser') {
@@ -1278,18 +1649,89 @@ function onPointerDown(e) {
     drawEraserCursor([px, py]);
   } else if (tools.tool === 'laser') {
     active = { ...base, kind: 'laser' };
-    if (laserPageId !== pageId) laserTrail = [];
-    laserPageId = pageId;
-    laserTrail.push({ x: px, y: py, t: performance.now() });
+    if (presenting) hidePresentBar();
+    addLaserPoint(e);
     startLaserLoop();
   } else {
     const cfg = tools[tools.tool];
     const stroke = { id: newId(), tool: tools.tool, color: cfg.color, size: cfg.size, points: [] };
     if (tools.tool === 'pen') { stroke.pen = cfg.type; stroke.dash = cfg.dash; }
-    active = { ...base, kind: 'draw', stroke, predicted: [], frame: 0, stab: tools.tool === 'pen' ? tools.pen.stab : 0, raw: null };
+    active = {
+      ...base, kind: 'draw', stroke, predicted: [], frame: 0, committed: 0,
+      stab: tools.tool === 'pen' ? tools.pen.stab : 0, raw: null, snapped: null, holdAt: null, holdTimer: 0,
+    };
+    if (presenting) hidePresentBar();
     addPoint(stroke, [px, py], pressureOf(e));
+    armHold(px, py);
     scheduleLive();
   }
+}
+
+// ---------- Hold to snap ----------
+
+function armHold(x, y) {
+  const a = active;
+  a.holdAt = [x, y];
+  clearTimeout(a.holdTimer);
+  a.holdTimer = setTimeout(() => trySnap(a), 520);
+}
+
+function trySnap(a) {
+  if (active !== a || a.snapped) return;
+  const s = a.stroke;
+  const res = recognize(s.points, { lineOnly: s.tool === 'highlighter' });
+  if (!res) return;
+  const ps = [];
+  for (let i = 2; i < s.points.length; i += 3) ps.push(s.points[i]);
+  ps.sort((x, y) => x - y);
+  const p = ps[Math.floor(ps.length / 2)] || 0.5;
+  let cx = 0, cy = 0;
+  for (const q of res.points) { cx += q[0]; cy += q[1]; }
+  cx /= res.points.length; cy /= res.points.length;
+  const pen = a.raw ? [a.raw[0], a.raw[1]] : a.holdAt;
+  a.snapped = { kind: res.kind, base: res.points, c: [cx, cy], pen, p };
+  s.points = toFlat(res.points, p);
+  s.shape = res.kind;
+  clearOverlay(els.wet);
+  a.committed = 0;
+  scheduleLive();
+}
+
+// While still holding after a snap, moving the Pencil resizes the shape
+// (a line's end follows the Pencil).
+function moveSnapped(a, x, y) {
+  const sn = a.snapped;
+  let list;
+  if (sn.kind === 'line') {
+    const [x0, y0] = sn.base[0];
+    const len = Math.hypot(x - x0, y - y0);
+    const k = Math.max(1, Math.ceil(len / 3));
+    list = [];
+    for (let i = 0; i <= k; i++) list.push([x0 + ((x - x0) * i) / k, y0 + ((y - y0) * i) / k]);
+  } else {
+    const d0 = Math.hypot(sn.pen[0] - sn.c[0], sn.pen[1] - sn.c[1]);
+    const d1 = Math.hypot(x - sn.c[0], y - sn.c[1]);
+    const f = d0 > 8 ? Math.max(0.1, d1 / d0) : 1;
+    list = sn.base.map(([px, py]) => [sn.c[0] + (px - sn.c[0]) * f, sn.c[1] + (py - sn.c[1]) * f]);
+  }
+  a.stroke.points = toFlat(list, sn.p);
+}
+
+// ---------- Fill ----------
+
+function fillAt(pageId, x, y) {
+  const pg = pages.get(pageId);
+  const res = findFillArea(pg.strokes, x, y);
+  if (res.error) {
+    showToast(res.error === 'line' ? 'Tap inside a shape to fill it.' : 'That area is not closed. Close the outline and try again.');
+    return;
+  }
+  const stroke = { id: newId(), tool: 'fill', color: tools.fill.color, size: 0, points: res.points, loops: res.loops };
+  computeBBox(stroke);
+  pg.strokes.push(stroke);
+  paintStroke(pageId, stroke);
+  pushUndo({ type: 'add', pageId, stroke });
+  markDirty(pageId);
 }
 
 function addPoint(stroke, [x, y], p) {
@@ -1317,20 +1759,28 @@ function onPointerMove(e) {
   const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   const list = events.length ? events : [e];
   if (active.kind === 'draw') {
-    for (const ev of list) {
-      const [x, y] = toPage(ev, active.rect);
-      active.raw = [x, y, pressureOf(ev)];
-      addPoint(active.stroke, stabilized(active, x, y), pressureOf(ev));
+    const a = active;
+    if (a.snapped) {
+      const [x, y] = toPage(e, a.rect);
+      moveSnapped(a, x, y);
+      scheduleLive();
+      return;
     }
-    const pred = !active.stab && e.getPredictedEvents ? e.getPredictedEvents() : [];
-    active.predicted = pred.slice(0, 2).map((ev) => toPage(ev, active.rect));
+    for (const ev of list) {
+      const [x, y] = toPage(ev, a.rect);
+      a.raw = [x, y, pressureOf(ev)];
+      addPoint(a.stroke, stabilized(a, x, y), pressureOf(ev));
+    }
+    const [hx, hy] = a.raw;
+    if (Math.hypot(hx - a.holdAt[0], hy - a.holdAt[1]) > 3.5 / scale) armHold(hx, hy);
+    const pred = !a.stab && e.getPredictedEvents ? e.getPredictedEvents() : [];
+    a.predicted = pred.slice(0, 3).map((ev) => toPage(ev, a.rect));
     scheduleLive();
   } else if (active.kind === 'erase') {
     for (const ev of list) eraseAt(toPage(ev, active.rect));
     drawEraserCursor(toPage(e, active.rect));
   } else if (active.kind === 'laser') {
-    const now = performance.now();
-    for (const ev of list) { const [x, y] = toPage(ev, active.rect); laserTrail.push({ x, y, t: now }); }
+    for (const ev of list) addLaserPoint(ev);
   } else if (active.kind === 'lasso') {
     for (const ev of list) active.pts.push(toPage(ev, active.rect));
     drawLassoPath();
@@ -1351,6 +1801,7 @@ function cancelInteraction() {
   const a = active;
   active = null;
   if (a.frame) cancelAnimationFrame(a.frame);
+  clearTimeout(a.holdTimer);
   if (a.kind === 'erase' && a.removed.length) {
     pushUndo({ type: 'erase', pageId: a.pageId, removed: a.removed });
     markDirty(a.pageId);
@@ -1366,31 +1817,27 @@ function finishInteraction() {
   if (a.kind === 'laser') { laserUp = performance.now(); return; }
   if (a.kind === 'sel') { endSelTransform(a); return; }
   if (a.kind === 'crop') return;
-  clearLive();
+  clearTimeout(a.holdTimer);
   const pg = pages.get(a.pageId);
-  if (!pg) return;
-  if (a.kind === 'lasso') { finishLasso(a); return; }
+  if (!pg) { clearLive(); return; }
+  if (a.kind === 'lasso') { clearLive(); finishLasso(a); return; }
   if (a.kind === 'draw') {
     if (a.frame) cancelAnimationFrame(a.frame);
-    if (!a.stroke.points.length) return;
-    if (a.stab && a.raw) addPoint(a.stroke, [a.raw[0], a.raw[1]], a.raw[2]);
+    if (!a.stroke.points.length) { clearLive(); return; }
+    if (a.stab && a.raw && !a.snapped) addPoint(a.stroke, [a.raw[0], a.raw[1]], a.raw[2]);
     computeBBox(a.stroke);
     pg.strokes.push(a.stroke);
-    const v = views.get(a.pageId);
-    if (v && v.lowScale) {
-      if (a.stroke.tool === 'highlighter') rerenderPage(a.pageId);
-      else {
-        const ctx = v.low.getContext('2d');
-        ctx.setTransform(v.lowScale, 0, 0, v.lowScale, 0, 0);
-        drawStroke(ctx, a.stroke);
-        if (v.hiShown) renderHi(a.pageId);
-      }
-    }
+    // Paint the finished stroke and drop the overlay in the same frame.
+    paintStroke(a.pageId, a.stroke);
+    clearLive();
     pushUndo({ type: 'add', pageId: a.pageId, stroke: a.stroke });
     markDirty(a.pageId);
-  } else if (a.removed && a.removed.length) {
-    pushUndo({ type: 'erase', pageId: a.pageId, removed: a.removed });
-    markDirty(a.pageId);
+  } else {
+    clearLive();
+    if (a.removed && a.removed.length) {
+      pushUndo({ type: 'erase', pageId: a.pageId, removed: a.removed });
+      markDirty(a.pageId);
+    }
   }
   scheduleHi();
 }
@@ -1402,61 +1849,104 @@ function clearCanvas(c) {
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.restore();
 }
-function clearLive() { clearCanvas(liveCanvas); }
+function clearLive() {
+  clearOverlay(els.wet);
+  clearOverlay(els.tail);
+  els.wet.classList.remove('hl');
+}
 
 function scheduleLive() {
   if (!active || active.frame) return;
-  active.frame = requestAnimationFrame(() => {
-    if (!active || active.kind !== 'draw') return;
-    active.frame = 0;
-    clearLive();
-    const s = active.stroke;
-    let show = s;
-    if (active.predicted.length && s.points.length && s.tool === 'pen') {
-      const pts = s.points.slice();
-      const lastP = pts[pts.length - 1];
-      for (const [x, y] of active.predicted) pts.push(x, y, lastP);
-      show = { ...s, points: pts };
+  active.frame = requestAnimationFrame(renderLive);
+}
+
+function renderLive() {
+  const a = active;
+  if (!a || a.kind !== 'draw') return;
+  a.frame = 0;
+  const s = a.stroke;
+  const n = s.points.length / 3;
+  if (!n) return;
+  clearOverlay(els.tail);
+  const wet = a.wetCtx, tail = a.tailCtx;
+  if (s.tool === 'highlighter') {
+    // Opaque on the overlay; the overlay itself is see-through and multiplied.
+    if (a.snapped) {
+      clearOverlay(els.wet);
+      drawStroke(wet, s, s.color);
+      return;
     }
-    drawStroke(active.liveCtx, show);
-  });
+    if (n - 1 > a.committed || n === 1) {
+      wet.save();
+      wet.strokeStyle = s.color;
+      wet.lineWidth = s.size;
+      wet.lineCap = 'round';
+      wet.lineJoin = 'round';
+      wet.beginPath();
+      const i0 = a.committed;
+      wet.moveTo(s.points[i0 * 3], s.points[i0 * 3 + 1]);
+      if (n === 1) wet.lineTo(s.points[0] + 0.01, s.points[1]);
+      for (let i = i0 + 1; i < n; i++) wet.lineTo(s.points[i * 3], s.points[i * 3 + 1]);
+      wet.stroke();
+      wet.restore();
+      a.committed = n - 1;
+    }
+    return;
+  }
+  if (!isSolidPen(s) || a.snapped) {
+    drawStroke(tail, s);
+    return;
+  }
+  // Solid pen: commit settled segments to "wet", redraw only the tail.
+  const R = strokeRadii(s);
+  const settled = Math.max(0, n - 1 - liveLag(s));
+  if (settled > a.committed) {
+    drawPenRange(wet, s, R, Math.max(0, a.committed - 1), settled);
+    a.committed = settled;
+  }
+  let show = s;
+  if (a.predicted.length) {
+    const pts = s.points.slice();
+    const lastP = pts[pts.length - 1];
+    for (const [x, y] of a.predicted) pts.push(x, y, lastP);
+    show = { ...s, points: pts };
+  }
+  const m = show.points.length / 3;
+  drawPenRange(tail, show, show === s ? R : strokeRadii(show), Math.max(0, a.committed - 1), m - 1);
+}
+
+// ---------- Laser ----------
+
+function addLaserPoint(ev) {
+  const pr = els.pages.getBoundingClientRect();
+  const t = ev.timeStamp > 0 && Math.abs(ev.timeStamp - performance.now()) < 1000 ? ev.timeStamp : performance.now();
+  laserTrail.push({ x: ev.clientX - pr.left, y: ev.clientY - pr.top, t });
 }
 
 function startLaserLoop() {
   if (laserFrame) return;
   const tick = () => {
     const now = performance.now();
-    const ctx = liveCanvas.getContext('2d');
-    clearLive();
+    const ctx = overlayCtx(els.tail, null);
+    clearOverlay(els.tail);
+    const pressing = !!(active && active.kind === 'laser');
     let alive;
     if (tools.laser.mode === 'dot') {
       const last = laserTrail[laserTrail.length - 1];
-      const pressing = active && active.kind === 'laser';
-      const fade = pressing ? 1 : Math.max(0, 1 - (now - laserUp) / 250);
-      if (last && fade > 0) {
-        ctx.save();
-        ctx.fillStyle = `rgba(255,45,45,${0.95 * fade})`;
-        ctx.shadowColor = `rgba(255,0,0,${0.9 * fade})`;
-        ctx.shadowBlur = 18;
-        ctx.beginPath();
-        ctx.arc(last.x, last.y, 9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = `rgba(255,220,220,${fade})`;
-        ctx.beginPath();
-        ctx.arc(last.x, last.y, 3.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
+      const fade = pressing ? 1 : Math.max(0, 1 - (now - laserUp) / 220);
+      if (last && fade > 0) drawLaserDot(ctx, last.x, last.y, fade);
       laserTrail = last ? [last] : [];
       alive = pressing || fade > 0;
       if (!alive) laserTrail = [];
     } else {
-      laserTrail = laserTrail.filter((p) => now - p.t < LASER_LIFE);
-      if (laserTrail.length) drawLaser(ctx, laserTrail, now);
-      alive = laserTrail.length || (active && active.kind === 'laser');
+      // Keep the newest point while the Pencil rests, so the head stays lit.
+      laserTrail = laserTrail.filter((p, i) => now - p.t < LASER_LIFE || (pressing && i === laserTrail.length - 1));
+      if (pressing && laserTrail.length) laserTrail[laserTrail.length - 1].t = Math.max(laserTrail[laserTrail.length - 1].t, now - 30);
+      if (laserTrail.length) drawLaser(ctx, laserTrail, now, pressing);
+      alive = laserTrail.length || pressing;
     }
     if (alive) laserFrame = requestAnimationFrame(tick);
-    else { laserFrame = 0; laserPageId = null; clearLive(); }
+    else { laserFrame = 0; clearOverlay(els.tail); }
   };
   laserFrame = requestAnimationFrame(tick);
 }
@@ -1473,21 +1963,36 @@ function eraseAt([x, y]) {
   } else samples.push([x, y]);
   active.last = [x, y];
   let changed = false;
+  const changedBox = [Infinity, Infinity, -Infinity, -Infinity];
   for (const [sx, sy] of samples) {
+    let hitInk = false;
     for (let i = pg.strokes.length - 1; i >= 0; i--) {
-      if (hitStroke(pg.strokes[i], sx, sy, r)) {
-        active.removed.push({ stroke: pg.strokes[i], index: i });
-        pg.strokes.splice(i, 1);
-        changed = true;
+      const st = pg.strokes[i];
+      // Fills are only erased where no ink is being erased at the same spot.
+      if (st.tool === 'fill') continue;
+      if (hitStroke(st, sx, sy, r)) { removeForErase(pg, i, changedBox); hitInk = true; changed = true; }
+    }
+    if (!hitInk) {
+      for (let i = pg.strokes.length - 1; i >= 0; i--) {
+        if (pg.strokes[i].tool === 'fill' && hitStroke(pg.strokes[i], sx, sy, r)) { removeForErase(pg, i, changedBox); changed = true; break; }
       }
     }
   }
-  if (changed) rerenderPage(active.pageId);
+  if (changed) redrawArea(active.pageId, changedBox);
+}
+
+function removeForErase(pg, i, box) {
+  const st = pg.strokes[i];
+  const b = st.bbox || computeBBox(st);
+  box[0] = Math.min(box[0], b[0]); box[1] = Math.min(box[1], b[1]);
+  box[2] = Math.max(box[2], b[2]); box[3] = Math.max(box[3], b[3]);
+  active.removed.push({ stroke: st, index: i });
+  pg.strokes.splice(i, 1);
 }
 
 function drawEraserCursor([x, y]) {
-  clearLive();
-  const ctx = active.liveCtx;
+  clearOverlay(els.tail);
+  const ctx = active.tailCtx;
   ctx.beginPath();
   ctx.arc(x, y, tools.eraser.size / 2, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(120,120,130,0.15)';
@@ -1500,8 +2005,8 @@ function drawEraserCursor([x, y]) {
 // ---------- Lasso ----------
 
 function drawLassoPath() {
-  clearLive();
-  const ctx = active.liveCtx;
+  clearOverlay(els.tail);
+  const ctx = active.tailCtx;
   const pts = active.pts;
   ctx.save();
   ctx.beginPath();
@@ -1791,15 +2296,19 @@ function buildSelBar() {
   const onlyItem = !strokes.length && items.length === 1 ? items[0] : null;
 
   if (strokes.length || (onlyItem && onlyItem.type === 'text')) {
-    const palette = strokes.length && strokes.every((s) => s.tool === 'highlighter') ? PALETTES.highlighter : PALETTES.pen;
+    const recolor = (c) => editSelection(
+      (s) => ({ ...s, color: c }),
+      (it) => (it.type === 'text' ? { ...it, color: c } : it),
+    );
+    const palette = strokes.length && strokes.every((s) => s.tool === 'highlighter') ? tools.highlighter.slots : tools.pen.slots;
     for (const c of palette) {
-      const b = colorButton(c, false, false, () => editSelection(
-        (s) => ({ ...s, color: c }),
-        (it) => (it.type === 'text' ? { ...it, color: c } : it),
-      ));
+      const b = colorButton(c, false, false, () => recolor(c));
       b.classList.add('small');
       bar.appendChild(b);
     }
+    const more = colorButton('#888', false, true, () => openColorPopover(more, palette[0], recolor));
+    more.classList.add('small');
+    bar.appendChild(more);
     sep();
   }
   if (strokes.length) {
@@ -2228,25 +2737,22 @@ async function addPageAfter(index) {
   showToast(`Page ${index + 1} added`);
 }
 
-function pageMenu(pageId) {
+function pageMenuItems(pageId) {
   const index = notebook.pageIds.indexOf(pageId);
   const pg = pages.get(pageId);
-  const mark = { label: pg.bookmarked ? 'Remove bookmark' : 'Bookmark page', onClick: () => toggleBookmark(pageId) };
-  if (isCover(pg)) {
-    openMenu('Cover', [
-      mark,
-      { label: 'Add page after', onClick: () => addPageAfter(index) },
-      { label: 'Clear cover', danger: true, onClick: () => clearPage(pageId) },
-    ]);
-    return;
-  }
-  openMenu(pageLabel(index), [
-    mark,
-    { label: 'Change template', onClick: () => templateSheet(pageId) },
-    { label: 'Add page after', onClick: () => addPageAfter(index) },
-    { label: 'Clear page', danger: true, onClick: () => clearPage(pageId) },
-    { label: 'Delete page', danger: true, onClick: () => deletePage(pageId) },
-  ]);
+  const cover = isCover(pg);
+  return [
+    { icon: ICONS.bookmark, label: pg.bookmarked ? 'Remove bookmark' : 'Bookmark', onClick: () => toggleBookmark(pageId) },
+    { icon: ICONS.template, label: 'Template', onClick: () => templateSheet(pageId), hidden: cover },
+    { icon: ICONS.addPage, label: 'Add page after', onClick: () => addPageAfter(index) },
+    { icon: ICONS.clear, label: cover ? 'Clear cover' : 'Clear page', danger: true, onClick: () => clearPage(pageId) },
+    { icon: ICONS.trash, label: 'Delete page', danger: true, onClick: () => deletePage(pageId), hidden: cover },
+  ];
+}
+
+function pageMenu(pageId, anchor) {
+  const index = notebook.pageIds.indexOf(pageId);
+  openMenu(pageLabel(index), pageMenuItems(pageId), anchor);
 }
 
 function clearPage(pageId) {

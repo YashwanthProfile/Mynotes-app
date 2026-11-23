@@ -6,7 +6,10 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 ## Features
 
 - Apple Pencil writing with pressure: fountain, ballpoint and brush pens, solid, dashed or dotted lines
-- Adjustable stroke stabilization for smoother handwriting
+- Fast live ink that draws only the newest part of each stroke, with adjustable stabilization
+- Hold at the end of a stroke to snap it to a neat line, triangle, rectangle, parallelogram, polygon, ellipse or circle, keeping its rotation
+- Colour fill for closed shapes, a full colour palette and a custom colour picker
+- Dark pages, search for typed text and sticky notes, and up to 600% zoom
 - Highlighter, stroke eraser, colours and sizes, undo and redo
 - Laser pointer with a fading trail or a dot that disappears when you lift the Pencil
 - Lasso selection: move, resize, rotate, recolour, change thickness or pen style, copy, paste, duplicate and delete
@@ -16,11 +19,11 @@ No App Store, no Mac, no fees. Notes are stored on your device.
 - Every notebook starts with a cover page you can write on, shown in the library
 - Six page templates (blank, lined, narrow, grid, dotted, Cornell) and paper colours, per page or whole notebook
 - Opens read-only by default with an Edit switch, plus a presentation mode with a floating toolbar
-- Folders (nested) to organise notebooks, with move and rename
+- Folders (nested) with colours, multi-select, move, rename and a Trash that keeps items for 30 days
 - Light, dark or system appearance, and an option to draw with a finger
 - Works offline once installed, and installs to the iPad Home Screen
 
-Coming next: export and backup, shapes, fill, Google Drive sync, PDF import.
+Coming next: export and backup, Google Drive sync, PDF import.
 
 ## Install on iPad
 
@@ -55,6 +58,8 @@ js/app.js               Library, folders and settings
 js/editor.js            Notebook editor: pages, Pencil input, tools, undo
 js/ink.js               Pen types, stroke drawing, laser and eraser hit testing
 js/items.js             Text boxes, images and sticky notes
+js/shapes.js            Hold-to-snap shape recognition
+js/fill.js              Colour fill
 js/templates.js         Page templates and paper colours
 js/ui.js                Shared menus, dialogs and icons
 js/settings.js          Per-device preferences

@@ -25,29 +25,45 @@ function makeSheet(className = 'sheet sheet-small') {
   return d;
 }
 
-// items: [{ label, danger?, onClick }]
-export function openMenu(title, items) {
-  const d = makeSheet();
-  const h = document.createElement('h2');
-  h.textContent = title;
+// items: [{ label, icon?, danger?, onClick } | { sep: true }]
+// With an anchor element the menu drops down from it; otherwise it is a sheet.
+export function openMenu(title, items, anchor) {
+  const d = makeSheet(anchor ? 'menu-pop' : 'sheet sheet-small menu-sheet');
+  if (title && !anchor) {
+    const h = document.createElement('h2');
+    h.textContent = title;
+    d.appendChild(h);
+  } else if (title) {
+    const h = document.createElement('div');
+    h.className = 'menu-title';
+    h.textContent = title;
+    d.appendChild(h);
+  }
   const list = document.createElement('div');
-  list.className = 'action-list';
+  list.className = 'menu-list';
   for (const it of items) {
+    if (it.sep) { const s = document.createElement('div'); s.className = 'menu-sep'; list.appendChild(s); continue; }
+    if (it.hidden) continue;
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'btn btn-block' + (it.danger ? ' btn-danger' : '');
-    b.textContent = it.label;
+    b.className = 'menu-item' + (it.danger ? ' danger' : '') + (it.checked ? ' checked' : '');
+    b.innerHTML = `<span class="menu-icon">${it.icon || ''}</span><span class="menu-label"></span>`;
+    b.querySelector('.menu-label').textContent = it.label;
     b.addEventListener('click', () => { d.close(); it.onClick(); });
     list.appendChild(b);
   }
-  const cancel = document.createElement('button');
-  cancel.type = 'button';
-  cancel.className = 'btn btn-block btn-ghost';
-  cancel.textContent = 'Cancel';
-  cancel.addEventListener('click', () => d.close());
-  list.appendChild(cancel);
-  d.append(h, list);
+  d.appendChild(list);
   d.showModal();
+  if (anchor) {
+    const r = anchor.getBoundingClientRect();
+    const w = d.offsetWidth, h = d.offsetHeight;
+    const left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8));
+    let top = r.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    d.style.left = `${left}px`;
+    d.style.top = `${top}px`;
+  }
+  return d;
 }
 
 export function confirmSheet(title, text, okLabel = 'Delete') {
@@ -149,4 +165,18 @@ export const ICONS = {
   sticky: '<svg viewBox="0 0 24 24"><path d="M4 4h16v10l-6 6H4z"/><path d="M14 20v-6h6"/></svg>',
   bookmark: '<svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>',
   more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg>',
+  fill: '<svg viewBox="0 0 24 24"><path d="M5 11.5L11.5 5l7 7-6.5 6.5a2 2 0 0 1-2.8 0L5 14.3a2 2 0 0 1 0-2.8z"/><path d="M8.5 3.5l3 3"/><path d="M5.5 12.5h12"/><path d="M20 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4.5h6V7"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  rename: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>',
+  palette: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.2 0 1.8-.8 1.8-1.7 0-1.3-1.1-1.6-1.1-2.8 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.6 17 3 12 3z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10" cy="7" r="1.2"/><circle cx="15" cy="7.5" r="1.2"/></svg>',
+  moon: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></svg>',
+  restore: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v4h4"/></svg>',
+  move: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M10 13h6M13.5 10.5L16 13l-2.5 2.5"/></svg>',
+  duplicate: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>',
+  select: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.2l2.4 2.4 4.6-4.8"/></svg>',
+  clear: '<svg viewBox="0 0 24 24"><path d="M4 7h16"/><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 11l6 6M15 11l-6 6"/></svg>',
+  cover: '<svg viewBox="0 0 24 24"><path d="M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M8 3v18"/></svg>',
 };

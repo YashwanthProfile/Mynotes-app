@@ -24,13 +24,13 @@
 <body>
   <!-- Library -->
   <section id="library-view" class="view">
-    <header class="topbar">
-      <button id="folder-back-btn" class="btn btn-ghost back-btn" type="button" hidden>‹ Back</button>
+    <header class="topbar lib-top">
+      <button id="folder-back-btn" class="icon-btn" type="button" aria-label="Back" hidden></button>
       <nav id="breadcrumb" class="breadcrumb" aria-label="Folder path"></nav>
+      <button id="select-btn" class="text-btn" type="button">Select</button>
+      <button id="trash-btn" class="icon-btn" type="button" aria-label="Trash"></button>
       <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings"></button>
-      <button id="new-btn" class="btn btn-primary" type="button">
-        <span aria-hidden="true">＋</span> New
-      </button>
+      <button id="new-btn" class="btn btn-primary btn-new" type="button" aria-label="New"></button>
     </header>
     <main class="library">
       <div id="empty-state" class="empty" hidden>
@@ -41,6 +41,14 @@
       </div>
       <ul id="item-grid" class="grid" aria-label="Folders and notebooks"></ul>
     </main>
+    <div id="select-bar" class="select-bar" hidden>
+      <span id="select-count" class="select-count">0 selected</span>
+      <button id="select-all-btn" class="text-btn" type="button">Select all</button>
+      <span class="select-spacer"></span>
+      <button id="select-move-btn" class="bar-action" type="button" disabled></button>
+      <button id="select-trash-btn" class="bar-action danger" type="button" disabled></button>
+      <button id="select-done-btn" class="text-btn strong" type="button">Done</button>
+    </div>
     <footer class="statusbar">
       <span id="storage-status"></span>
       <span id="version-label"></span>
@@ -50,8 +58,9 @@
   <!-- Notebook editor -->
   <section id="notebook-view" class="view mode-read" hidden>
     <header class="topbar editor-top">
-      <button id="back-btn" class="btn btn-ghost back-btn" type="button" aria-label="Back to library">‹ Library</button>
+      <button id="back-btn" class="icon-btn" type="button" aria-label="Back to library"></button>
       <button id="thumbs-btn" class="icon-btn" type="button" aria-label="Page overview"></button>
+      <button id="search-btn" class="icon-btn" type="button" aria-label="Search in notebook"></button>
       <button id="notebook-title" class="title-btn" type="button" aria-label="Rename notebook"></button>
       <button id="page-indicator" class="page-indicator" type="button" aria-label="Show pages"></button>
       <button id="undo-btn" class="icon-btn edit-only" type="button" aria-label="Undo"></button>
@@ -64,12 +73,17 @@
     <div id="stage" class="stage">
       <aside id="thumbs" class="thumbs" aria-label="Pages" hidden></aside>
       <main id="pages" class="pages"><div id="pages-inner" class="pages-inner"></div></main>
+      <canvas id="ink-wet" class="ink-overlay" aria-hidden="true"></canvas>
+      <canvas id="ink-tail" class="ink-overlay" aria-hidden="true"></canvas>
+      <div id="search-panel" class="search-panel" hidden>
+        <input id="search-input" type="search" placeholder="Search this notebook" autocomplete="off" enterkeyhint="search">
+        <div id="search-results" class="search-results"></div>
+      </div>
       <div id="pull-hint" class="pull-hint" hidden><span class="pull-ring"></span><span class="pull-text">Pull up to add a page</span></div>
       <div id="zoom-badge" class="zoom-badge" hidden></div>
       <div id="present-bar" class="present-bar" role="toolbar" aria-label="Presentation tools" hidden></div>
     </div>
     <div id="pen-popover" class="popover" hidden></div>
-    <input id="custom-color" type="color" class="visually-hidden" tabindex="-1" aria-hidden="true">
     <input id="image-input" type="file" accept="image/*" class="visually-hidden" tabindex="-1" aria-hidden="true">
   </section>
 
@@ -108,6 +122,14 @@
       </div>
     </div>
     <div class="field">
+      <span>Pages</span>
+      <div class="segmented" id="dark-pages-options" role="radiogroup" aria-label="Page colour">
+        <button type="button" data-dark-pages="off" role="radio">Light</button>
+        <button type="button" data-dark-pages="on" role="radio">Dark</button>
+        <button type="button" data-dark-pages="auto" role="radio">Match app</button>
+      </div>
+    </div>
+    <div class="field">
       <span>Open notebooks in</span>
       <div class="segmented segmented-2" id="open-mode-options" role="radiogroup" aria-label="Open notebooks in">
         <button type="button" data-open-mode="read" role="radio">Read only</button>
@@ -126,6 +148,17 @@
       <div id="settings-version"></div>
     </div>
     <div class="actions">
+      <button type="button" class="btn btn-primary" data-close>Done</button>
+    </div>
+  </dialog>
+
+  <!-- Trash -->
+  <dialog id="trash-dialog" class="sheet">
+    <h2>Trash</h2>
+    <p class="sheet-text">Items here are deleted for good after 30 days.</p>
+    <ul id="trash-list" class="trash-list"></ul>
+    <div class="actions">
+      <button type="button" class="btn btn-danger" id="empty-trash-btn">Empty Trash</button>
       <button type="button" class="btn btn-primary" data-close>Done</button>
     </div>
   </dialog>

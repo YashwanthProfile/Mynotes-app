@@ -8,7 +8,8 @@ import { initEditor, openEditor, closeEditor, renderCoverThumb } from './editor.
 import { TEMPLATES, applyPaper } from './templates.js';
 import { getPage } from './db.js';
 
-const COVERS = ['#2f6fdf', '#1f9d8b', '#e0a526', '#d9503f', '#8a5cd6', '#3d4a5c', '#c46a9b', '#6a9f3a'];
+const COVERS = ['#2f6fdf', '#1f9d8b', '#e0a526', '#d9503f', '#8a5cd6', '#3d4a5c', '#c46a9b', '#6a9f3a', '#1c1c1e', '#b0743c'];
+const FOLDER_COLORS = ['#5b9df9', '#4cc3d9', '#55c27a', '#f5c33b', '#f59a3b', '#ef6461', '#e86fae', '#9b7bf0', '#8e8e93', '#3d4a5c'];
 const PAPERS = TEMPLATES;
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +25,18 @@ const els = {
   folderBack: $('folder-back-btn'),
   breadcrumb: $('breadcrumb'),
   settingsBtn: $('settings-btn'),
+  selectBtn: $('select-btn'),
+  trashBtn: $('trash-btn'),
+  selectBar: $('select-bar'),
+  selectCount: $('select-count'),
+  selectAll: $('select-all-btn'),
+  selectMove: $('select-move-btn'),
+  selectTrash: $('select-trash-btn'),
+  selectDone: $('select-done-btn'),
+  trashDialog: $('trash-dialog'),
+  trashList: $('trash-list'),
+  emptyTrashBtn: $('empty-trash-btn'),
+  darkPagesOptions: $('dark-pages-options'),
   storageStatus: $('storage-status'),
   versionLabel: $('version-label'),
   nbDialog: $('notebook-dialog'),
@@ -48,6 +61,9 @@ const state = {
   cover: COVERS[0],
   paper: 'lined',
   version: '',
+  selecting: false,
+  selected: new Set(),
+  visible: [],
 };
 
 // ---------- Helpers ----------
@@ -98,8 +114,13 @@ function folderTreeOptions(folders, exclude = new Set()) {
 
 // ---------- Library ----------
 
+const TRASH_DAYS = 30;
+const live = (x) => !x.trashedAt;
+
 async function renderLibrary() {
-  const [folders, notebooks] = await Promise.all([listFolders(), listNotebooks()]);
+  const [allFolders, allNotebooks] = await Promise.all([listFolders(), listNotebooks()]);
+  const folders = allFolders.filter(live);
+  const notebooks = allNotebooks.filter(live);
   if (state.folderId && !folders.some((f) => f.id === state.folderId)) state.folderId = null;
 
   // Breadcrumb
@@ -126,42 +147,50 @@ async function renderLibrary() {
   const here = (x) => (x || null) === state.folderId;
   const subfolders = folders.filter((f) => here(f.parentId));
   const books = notebooks.filter((n) => here(n.folderId));
+  state.visible = [...subfolders.map((f) => `f:${f.id}`), ...books.map((n) => `n:${n.id}`)];
+  for (const k of [...state.selected]) if (!state.visible.includes(k)) state.selected.delete(k);
 
   els.grid.replaceChildren();
+  els.grid.classList.toggle('selecting', state.selecting);
   const empty = subfolders.length === 0 && books.length === 0;
   els.empty.hidden = !empty;
   if (empty) {
     els.emptyTitle.textContent = state.folderId ? 'This folder is empty' : 'No notebooks yet';
-    els.emptyText.textContent = 'Create a notebook or a folder to get started.';
+    els.emptyText.textContent = 'Tap + to create a notebook or a folder.';
   }
 
   for (const f of subfolders) {
     const count = folders.filter((x) => x.parentId === f.id).length + notebooks.filter((n) => n.folderId === f.id).length;
     els.grid.appendChild(card({
+      key: `f:${f.id}`,
       kind: 'folder',
       title: f.name,
       sub: count === 1 ? '1 item' : `${count} items`,
       color: f.color,
       onOpen: () => goToFolder(f.id),
-      onMore: () => folderActions(f, folders),
+      onMore: (anchor) => folderActions(f, folders, anchor),
     }));
   }
   for (const nb of books) {
     els.grid.appendChild(card({
+      key: `n:${nb.id}`,
       kind: 'notebook',
       title: nb.title,
       sub: formatDate(nb.updatedAt),
       color: nb.cover,
       thumb: nb.thumb,
       onOpen: () => openNotebook(nb.id),
-      onMore: () => notebookActions(nb, folders),
+      onMore: (anchor) => notebookActions(nb, folders, anchor),
     }));
   }
+  updateSelectBar();
+  updateTrashButton(allFolders, allNotebooks);
 }
 
-function card({ kind, title, sub, color, thumb, onOpen, onMore }) {
+function card({ key, kind, title, sub, color, thumb, onOpen, onMore }) {
   const li = document.createElement('li');
-  li.className = `card card-${kind}`;
+  li.className = `card card-${kind}` + (state.selected.has(key) ? ' picked' : '');
+  li.dataset.key = key;
   const open = document.createElement('button');
   open.type = 'button';
   open.className = kind === 'folder' ? 'folder-art' : 'cover';
@@ -171,67 +200,156 @@ function card({ kind, title, sub, color, thumb, onOpen, onMore }) {
     open.style.backgroundImage = `url("${thumb}")`;
   }
   open.setAttribute('aria-label', `Open ${title}`);
-  open.addEventListener('click', onOpen);
+  open.addEventListener('click', () => {
+    if (state.selecting) { toggleSelected(key); return; }
+    onOpen();
+  });
+  const check = document.createElement('span');
+  check.className = 'pick-check';
+  check.innerHTML = ICONS.check;
 
-  const meta = document.createElement('div');
+  const meta = document.createElement('button');
+  meta.type = 'button';
   meta.className = 'card-meta';
-  const text = document.createElement('div');
-  text.className = 'card-text';
-  const t = document.createElement('div');
+  meta.setAttribute('aria-label', `Options for ${title}`);
+  const t = document.createElement('span');
   t.className = 'card-title';
   t.textContent = title;
-  const s = document.createElement('div');
+  const chev = document.createElement('span');
+  chev.className = 'card-chev';
+  chev.setAttribute('aria-hidden', 'true');
+  const s = document.createElement('span');
   s.className = 'card-date';
   s.textContent = sub;
-  text.append(t, s);
-  const more = document.createElement('button');
-  more.type = 'button';
-  more.className = 'icon-btn small';
-  more.innerHTML = ICONS.more;
-  more.setAttribute('aria-label', `Options for ${title}`);
-  more.addEventListener('click', onMore);
-  meta.append(text, more);
-  li.append(open, meta);
+  meta.append(t, chev, s);
+  meta.addEventListener('click', () => {
+    if (state.selecting) { toggleSelected(key); return; }
+    onMore(meta);
+  });
+  const art = document.createElement('div');
+  art.className = 'card-art';
+  art.append(open, check);
+  li.append(art, meta);
   return li;
 }
 
 function goToFolder(id, { push = true } = {}) {
   state.folderId = id;
+  state.selected.clear();
   if (push) history.pushState({ folder: id }, '');
   renderLibrary();
+}
+
+// ---------- Select mode ----------
+
+function setSelecting(on) {
+  state.selecting = on;
+  state.selected.clear();
+  els.selectBtn.hidden = on;
+  els.selectBar.hidden = !on;
+  els.newBtn.disabled = on;
+  renderLibrary();
+}
+
+function toggleSelected(key) {
+  if (state.selected.has(key)) state.selected.delete(key); else state.selected.add(key);
+  const li = els.grid.querySelector(`[data-key="${key}"]`);
+  if (li) li.classList.toggle('picked', state.selected.has(key));
+  updateSelectBar();
+}
+
+function updateSelectBar() {
+  const n = state.selected.size;
+  els.selectCount.textContent = n === 1 ? '1 selected' : `${n} selected`;
+  els.selectMove.disabled = !n;
+  els.selectTrash.disabled = !n;
+  const all = state.visible.length && state.visible.every((k) => state.selected.has(k));
+  els.selectAll.textContent = all ? 'Deselect all' : 'Select all';
+}
+
+function selectedIds() {
+  const folders = [], notebooks = [];
+  for (const k of state.selected) (k.startsWith('f:') ? folders : notebooks).push(k.slice(2));
+  return { folders, notebooks };
+}
+
+async function moveSelected() {
+  const { folders: fIds, notebooks: nIds } = selectedIds();
+  const folders = (await listFolders()).filter(live);
+  const exclude = new Set();
+  for (const id of fIds) for (const d of descendantsOf(folders, id)) exclude.add(d);
+  const n = fIds.length + nIds.length;
+  const target = await pickSheet(n === 1 ? 'Move 1 item to' : `Move ${n} items to`, folderTreeOptions(folders, exclude));
+  if (target === undefined) return;
+  for (const id of nIds) await updateNotebook(id, { folderId: target }, { touch: false });
+  for (const id of fIds) await updateFolder(id, { parentId: target });
+  showToast('Moved');
+  setSelecting(false);
+}
+
+async function trashSelected() {
+  const { folders: fIds, notebooks: nIds } = selectedIds();
+  const now = Date.now();
+  for (const id of nIds) await updateNotebook(id, { trashedAt: now }, { touch: false });
+  for (const id of fIds) await updateFolder(id, { trashedAt: now });
+  const n = fIds.length + nIds.length;
+  showToast(n === 1 ? 'Moved to Trash' : `${n} items moved to Trash`, {
+    label: 'Undo',
+    onClick: async () => {
+      for (const id of nIds) await updateNotebook(id, { trashedAt: null }, { touch: false });
+      for (const id of fIds) await updateFolder(id, { trashedAt: null });
+      renderLibrary();
+    },
+  });
+  setSelecting(false);
 }
 
 // ---------- Actions ----------
 
 function newMenu() {
-  openMenu('Create', [
-    { label: 'New notebook', onClick: openCreateDialog },
-    { label: 'New folder', onClick: newFolder },
-  ]);
+  openMenu('', [
+    { icon: ICONS.cover, label: 'Notebook', onClick: openCreateDialog },
+    { icon: ICONS.folder, label: 'Folder', onClick: newFolder },
+  ], els.newBtn);
 }
 
 async function newFolder() {
   const name = await promptSheet('New folder', { placeholder: 'New folder', okLabel: 'Create' });
   if (!name) return;
-  await createFolder({ name, parentId: state.folderId, color: COVERS[Math.floor(Math.random() * COVERS.length)] });
+  await createFolder({ name, parentId: state.folderId, color: FOLDER_COLORS[Math.floor(Math.random() * FOLDER_COLORS.length)] });
   renderLibrary();
 }
 
-function notebookActions(nb, folders) {
-  openMenu(nb.title, [
-    { label: 'Rename or change cover', onClick: () => openEditDialog(nb) },
-    { label: 'Move to folder', onClick: () => moveNotebook(nb, folders) },
+async function moveToTrash(kind, item) {
+  if (kind === 'notebook') await updateNotebook(item.id, { trashedAt: Date.now() }, { touch: false });
+  else await updateFolder(item.id, { trashedAt: Date.now() });
+  showToast('Moved to Trash', {
+    label: 'Undo',
+    onClick: async () => {
+      if (kind === 'notebook') await updateNotebook(item.id, { trashedAt: null }, { touch: false });
+      else await updateFolder(item.id, { trashedAt: null });
+      renderLibrary();
+    },
+  });
+  renderLibrary();
+}
+
+function notebookActions(nb, folders, anchor) {
+  openMenu('', [
     {
-      label: 'Delete notebook', danger: true,
+      icon: ICONS.rename, label: 'Rename',
       onClick: async () => {
-        const ok = await confirmSheet(`Delete “${nb.title}”?`, 'This removes the notebook and all its pages from this iPad.');
-        if (!ok) return;
-        await deleteNotebook(nb.id);
-        showToast('Notebook deleted');
+        const name = await promptSheet('Rename notebook', { value: nb.title, okLabel: 'Rename' });
+        if (!name) return;
+        await updateNotebook(nb.id, { title: name }, { touch: false });
         renderLibrary();
       },
     },
-  ]);
+    { icon: ICONS.cover, label: 'Change cover', onClick: () => openEditDialog(nb) },
+    { icon: ICONS.move, label: 'Move', onClick: () => moveNotebook(nb, folders) },
+    { sep: true },
+    { icon: ICONS.trash, label: 'Move to Trash', danger: true, onClick: () => moveToTrash('notebook', nb) },
+  ], anchor);
 }
 
 async function moveNotebook(nb, folders) {
@@ -242,10 +360,37 @@ async function moveNotebook(nb, folders) {
   renderLibrary();
 }
 
-function folderActions(f, folders) {
-  openMenu(f.name, [
+function colorSheet(title, colors, current) {
+  return new Promise((resolve) => {
+    const d = document.createElement('dialog');
+    d.className = 'sheet sheet-small';
+    document.body.appendChild(d);
+    let result = null;
+    const h = document.createElement('h2');
+    h.textContent = title;
+    const row = document.createElement('div');
+    row.className = 'swatches';
+    for (const c of colors) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'swatch';
+      b.style.background = c;
+      b.setAttribute('aria-label', c);
+      b.setAttribute('aria-checked', String(c === current));
+      b.addEventListener('click', () => { result = c; d.close(); });
+      row.appendChild(b);
+    }
+    d.append(h, row);
+    d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
+    d.addEventListener('close', () => { resolve(result); setTimeout(() => d.remove(), 0); });
+    d.showModal();
+  });
+}
+
+function folderActions(f, folders, anchor) {
+  openMenu('', [
     {
-      label: 'Rename folder',
+      icon: ICONS.rename, label: 'Rename',
       onClick: async () => {
         const name = await promptSheet('Rename folder', { value: f.name, okLabel: 'Rename' });
         if (!name) return;
@@ -254,7 +399,16 @@ function folderActions(f, folders) {
       },
     },
     {
-      label: 'Move to folder',
+      icon: ICONS.palette, label: 'Colour',
+      onClick: async () => {
+        const c = await colorSheet('Folder colour', FOLDER_COLORS, f.color);
+        if (!c) return;
+        await updateFolder(f.id, { color: c });
+        renderLibrary();
+      },
+    },
+    {
+      icon: ICONS.move, label: 'Move',
       onClick: async () => {
         const target = await pickSheet(`Move “${f.name}” to`, folderTreeOptions(folders, descendantsOf(folders, f.id)));
         if (target === undefined) return;
@@ -263,17 +417,99 @@ function folderActions(f, folders) {
         renderLibrary();
       },
     },
-    {
-      label: 'Delete folder', danger: true,
-      onClick: async () => {
-        const ok = await confirmSheet(`Delete “${f.name}”?`, 'This deletes the folder and every notebook and folder inside it.');
-        if (!ok) return;
-        await deleteFolderDeep(f.id);
-        showToast('Folder deleted');
-        renderLibrary();
-      },
-    },
-  ]);
+    { sep: true },
+    { icon: ICONS.trash, label: 'Move to Trash', danger: true, onClick: () => moveToTrash('folder', f) },
+  ], anchor);
+}
+
+// ---------- Trash ----------
+
+function updateTrashButton(folders, notebooks) {
+  const n = folders.filter((f) => f.trashedAt).length + notebooks.filter((x) => x.trashedAt).length;
+  els.trashBtn.classList.toggle('has-items', n > 0);
+}
+
+async function purgeOldTrash() {
+  const limit = Date.now() - TRASH_DAYS * 864e5;
+  for (const nb of await listNotebooks()) if (nb.trashedAt && nb.trashedAt < limit) await deleteNotebook(nb.id);
+  for (const f of await listFolders()) if (f.trashedAt && f.trashedAt < limit) await deleteFolderDeep(f.id);
+}
+
+async function renderTrash() {
+  const [folders, notebooks] = await Promise.all([listFolders(), listNotebooks()]);
+  const list = els.trashList;
+  list.replaceChildren();
+  const rows = [
+    ...folders.filter((f) => f.trashedAt).map((f) => ({ kind: 'folder', item: f, title: f.name, color: f.color })),
+    ...notebooks.filter((n) => n.trashedAt).map((n) => ({ kind: 'notebook', item: n, title: n.title, color: n.cover, thumb: n.thumb })),
+  ].sort((a, b) => b.item.trashedAt - a.item.trashedAt);
+  els.emptyTrashBtn.disabled = !rows.length;
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'trash-empty';
+    li.textContent = 'Trash is empty.';
+    list.appendChild(li);
+    return;
+  }
+  for (const r of rows) {
+    const li = document.createElement('li');
+    li.className = 'trash-row';
+    const art = document.createElement('span');
+    art.className = r.kind === 'folder' ? 'trash-art folder' : 'trash-art';
+    art.style.setProperty('--c', r.color);
+    if (r.thumb) art.style.backgroundImage = `url("${r.thumb}")`;
+    const text = document.createElement('span');
+    text.className = 'trash-text';
+    const t = document.createElement('strong');
+    t.textContent = r.title;
+    const days = Math.max(0, TRASH_DAYS - Math.floor((Date.now() - r.item.trashedAt) / 864e5));
+    const sub = document.createElement('small');
+    sub.textContent = days === 1 ? 'Deleted in 1 day' : `Deleted in ${days} days`;
+    text.append(t, sub);
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'icon-btn small';
+    restore.innerHTML = ICONS.restore;
+    restore.setAttribute('aria-label', `Restore ${r.title}`);
+    restore.addEventListener('click', async () => {
+      if (r.kind === 'folder') await updateFolder(r.item.id, { trashedAt: null });
+      else {
+        // Restore to the top level if its folder is gone.
+        const parentOk = !r.item.folderId || folders.some((f) => f.id === r.item.folderId && !f.trashedAt);
+        await updateNotebook(r.item.id, { trashedAt: null, ...(parentOk ? {} : { folderId: null }) }, { touch: false });
+      }
+      renderTrash();
+      renderLibrary();
+    });
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'icon-btn small danger';
+    del.innerHTML = ICONS.trash;
+    del.setAttribute('aria-label', `Delete ${r.title} for good`);
+    del.addEventListener('click', async () => {
+      const ok = await confirmSheet(`Delete “${r.title}” for good?`, 'This cannot be undone.');
+      if (!ok) return;
+      if (r.kind === 'folder') await deleteFolderDeep(r.item.id); else await deleteNotebook(r.item.id);
+      renderTrash();
+      renderLibrary();
+    });
+    li.append(art, text, restore, del);
+    list.appendChild(li);
+  }
+}
+
+async function openTrash() {
+  await renderTrash();
+  els.trashDialog.showModal();
+}
+
+async function emptyTrash() {
+  const ok = await confirmSheet('Empty Trash?', 'Everything in the Trash will be deleted for good.', 'Empty Trash');
+  if (!ok) return;
+  for (const nb of await listNotebooks()) if (nb.trashedAt) await deleteNotebook(nb.id);
+  for (const f of await listFolders()) if (f.trashedAt) await deleteFolderDeep(f.id);
+  renderTrash();
+  renderLibrary();
 }
 
 // ---------- Create / edit notebook dialog ----------
@@ -360,6 +596,9 @@ function renderSettings() {
   els.openModeOptions.querySelectorAll('button').forEach((b) => {
     b.setAttribute('aria-checked', String(b.dataset.openMode === s.openMode));
   });
+  els.darkPagesOptions.querySelectorAll('button').forEach((b) => {
+    b.setAttribute('aria-checked', String(b.dataset.darkPages === s.darkPages));
+  });
   els.settingsVersion.textContent = state.version ? `MyNotes v${state.version}` : 'MyNotes';
 }
 
@@ -379,6 +618,12 @@ els.openModeOptions.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   setSetting('openMode', b.dataset.openMode);
+  renderSettings();
+});
+els.darkPagesOptions.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  setSetting('darkPages', b.dataset.darkPages);
   renderSettings();
 });
 els.fingerToggle.addEventListener('change', () => setSetting('fingerDraw', els.fingerToggle.checked));
@@ -465,14 +710,31 @@ function initServiceWorker() {
 
 applyTheme();
 els.settingsBtn.innerHTML = ICONS.gear;
-[els.nbDialog, els.settingsDialog].forEach(wireDialog);
+els.trashBtn.innerHTML = ICONS.trash;
+els.newBtn.innerHTML = ICONS.plus;
+els.folderBack.innerHTML = ICONS.back;
+els.selectMove.innerHTML = `${ICONS.move}<span>Move</span>`;
+els.selectTrash.innerHTML = `${ICONS.trash}<span>Trash</span>`;
+[els.nbDialog, els.settingsDialog, els.trashDialog].forEach(wireDialog);
 els.newBtn.addEventListener('click', newMenu);
+els.selectBtn.addEventListener('click', () => setSelecting(true));
+els.selectDone.addEventListener('click', () => setSelecting(false));
+els.selectAll.addEventListener('click', () => {
+  const all = state.visible.length && state.visible.every((k) => state.selected.has(k));
+  state.selected = new Set(all ? [] : state.visible);
+  renderLibrary();
+});
+els.selectMove.addEventListener('click', moveSelected);
+els.selectTrash.addEventListener('click', trashSelected);
+els.trashBtn.addEventListener('click', openTrash);
+els.emptyTrashBtn.addEventListener('click', emptyTrash);
 els.emptyCreateBtn.addEventListener('click', openCreateDialog);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.selecting) setSelecting(false); });
 els.folderBack.addEventListener('click', () => history.back());
 els.settingsBtn.addEventListener('click', openSettings);
 
 initEditor({ onClose: () => history.back() });
 history.replaceState({ folder: null }, '');
-renderLibrary();
+purgeOldTrash().catch(() => {}).then(renderLibrary);
 initStorage();
 initServiceWorker();
